@@ -26,7 +26,12 @@ pub struct FeeForensics {
     pub pending: U256,
 }
 
-pub async fn fee_forensics(rpc: &Rpc, recipient: Address, curve: Address, from_block: u64) -> anyhow::Result<FeeForensics> {
+pub async fn fee_forensics(
+    rpc: &Rpc,
+    recipient: Address,
+    curve: Address,
+    from_block: u64,
+) -> anyhow::Result<FeeForensics> {
     let head = rpc.block_number(Lane::Background).await?;
     let step = 1_000_000u64;
     let mut out = FeeForensics {
@@ -49,7 +54,9 @@ pub async fn fee_forensics(rpc: &Rpc, recipient: Address, curve: Address, from_b
                 Filter::new()
                     .address(ADDR.pons_escrow)
                     .event_signature(escrow::Credited::SIGNATURE_HASH)
-                    .topic1(alloy::primitives::B256::left_padding_from(recipient.as_slice()))
+                    .topic1(alloy::primitives::B256::left_padding_from(
+                        recipient.as_slice(),
+                    ))
                     .from_block(b)
                     .to_block(to),
             )
@@ -60,7 +67,9 @@ pub async fn fee_forensics(rpc: &Rpc, recipient: Address, curve: Address, from_b
                 Filter::new()
                     .address(ADDR.pons_escrow)
                     .event_signature(escrow::Claimed::SIGNATURE_HASH)
-                    .topic1(alloy::primitives::B256::left_padding_from(recipient.as_slice()))
+                    .topic1(alloy::primitives::B256::left_padding_from(
+                        recipient.as_slice(),
+                    ))
                     .from_block(b)
                     .to_block(to),
             )
@@ -99,7 +108,12 @@ pub async fn fee_forensics(rpc: &Rpc, recipient: Address, curve: Address, from_b
         }
     }
     out.pending = rpc
-        .eth_call(Lane::Background, ADDR.pons_escrow, escrow::balanceOfCall { recipient }, None)
+        .eth_call(
+            Lane::Background,
+            ADDR.pons_escrow,
+            escrow::balanceOfCall { recipient },
+            None,
+        )
         .await
         .unwrap_or(U256::ZERO);
     Ok(out)

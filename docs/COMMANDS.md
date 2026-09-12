@@ -24,7 +24,7 @@ A dry run reads the same chain state and prints the same decision; it just does 
 | [`claim`](#claim) | claim your creator fees from the pons escrow | only with `--live` |
 | `helper deploy/check` | `BodkinBuyOnce` create / bytecode at `HELPER_ADDRESS` | `--live` to broadcast |
 | `outcomes` | print `data/outcomes.jsonl` lift / hit / landing | no |
-| `replay --hours N` | sampled TokenLaunched vs an alternate entry second | no |
+| `replay --hours N` | recorded launch-time screens plus observed first-60-block logs at an alternate entry second | no |
 
 ---
 
@@ -94,24 +94,19 @@ bodkin snipe [--live] [--eth <n>] [--min-score <n>] [--max-tax-bps <n>] [--slipp
 | `--deployer <a...>` | | only these deployers |
 | `--max-open <n>` | 3 | simultaneous positions |
 | `--allow-pairs` | off | also fire on USDG- and stock-token-paired launches |
-| `--budget <eth>` | `SNIPE_BUDGET_ETH` (0.05) | stop firing once this much ETH has gone into entries this session |
+| `--budget <eth>` | `SNIPE_BUDGET_ETH` (0.05) | live entry value plus worst-case burst-gas reservations allowed this session |
 | `--yes` | off | skip the live confirmation prompt (for scripts) |
 | `--for <seconds>` | | stop after this many seconds |
 
-The loop: detect → read → score → rules → wait until `currentSnipeTaxBps(you) ≤ ceiling` (polled every 150 ms, give up after 12 s) →
-buy on the curve → mark every 5 s → sell on take profit, stop loss, trailing stop, or max hold. Every `pass` prints the rule that refused
-the launch. Exits are configured in `.env` (`TAKE_PROFIT_PCT`, `STOP_LOSS_PCT`, `TRAILING_PCT`, `MAX_HOLD_MIN`).
-Optional Telegram alerts on fire and exit when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set.
+The loop: detect → strict Multicall/transaction enrichment → score and rules → reserve budget/slot → wait to the `launchedAt + 2` gate → ingest ordered curve flow → recheck pause and live gates → pre-sign and dispatch the sequencer burst just before the first +2 block → reconcile every attempted hash and matching receipt event before opening a position. Marks run every second for the first minute and every 30 seconds later. On-curve exits are ladder, stale, insider sell, or graduation boundary; take-profit, stop-loss, trailing stop, and max-hold apply only after graduation. Every refusal reports its reason.
 
-With `--live`, before anything is armed, the terminal prints the signer's address, its balance, the size per buy, the position cap and
-the session budget, refuses if the balance does not cover one buy, and waits for you to type `arm`. The session budget is the wall
-between a bad hour and an empty wallet: once entries have consumed it, every further launch is refused with `session budget reached`.
+With `--live`, before anything is armed, the terminal prints the signer, balance, size per buy, worst-case gas across the configured burst, position cap, and session budget. Balance and budget must cover one entry plus that reserve before it accepts `arm`. Admission reserves the worst case, then receipt reconciliation commits actual entry value and mined gas; unresolved attempts retain the reservation.
 
 In the cards and the FIRE lines the symbol and the contract are terminal hyperlinks (Ctrl+click in Windows Terminal, iTerm2, kitty,
 VS Code): the symbol opens the launch on Axiom, the contract opens it on FOMO, and every card ends with an `open:` line for pons,
 Axiom, FOMO and the explorer. The handles from `.env` only feed the sign-up line printed under the header.
 
-Run **one** engine per `data/` directory: `snipe` and `board` both write `data/positions.json`.
+Run **one** engine or live command per `data/` directory. `data/bodkin.redb` is opened with an exclusive process lock, so a concurrent `snipe`, `board`, `buy --live`, `sell --live`, `claim --live`, or helper deployment refuses instead of sharing nonce or portfolio state.
 
 ## watch
 
@@ -176,7 +171,7 @@ Refuses during the swept gap between the two. Pool sells go through Permit2 (one
 bodkin positions
 ```
 
-Every position in `data/positions.json` with a live mark for the open ones: entry, current or exit value, PnL, USD, and the exit reason.
+Every position in authoritative `data/bodkin.redb` with a live mark for the open ones: entry, current or exit value, PnL, USD, and the exit reason. `data/positions.json` is an atomic human-readable export, not an editable source of truth.
 
 ## wallet
 
@@ -193,7 +188,13 @@ bodkin claim [--live]
 ```
 
 If you are the creator wallet of a launch, your share of every trade accrues in the pons escrow. `claim` reads the pending balance and,
-with `--live`, calls `claim()` and prints what arrived.
+with `--live`, calls `claim()` and prints the receipt-derived `Claimed` amount.
+
+## outcomes and replay
+
+`bodkin outcomes` strictly reads `data/outcomes.jsonl`; a malformed line is an error rather than silently disappearing. Confirmed live fills, simulated dry entries, legacy/unverified fires, measured live exits, simulated exits, and unavailable signed-PnL totals remain separate.
+
+`bodkin replay --hours 6 [--sample N] [--entry-second 2]` uses schema-2 launch snapshots and ordered curve events captured by `snipe` or `board`, then observes up to the first 60 blocks. It prints a dataset hash and strategy manifest, reconstructs reserve changes only from events after the recorded snapshot and before the candidate entry cutoff, and reports the deterministic entry quote separately from observed graduation. Missing provenance, incomplete ranges, and historical outcomes remain explicitly unmeasured; replay never invents a fill, execution block, or profitability.
 
 ---
 
@@ -215,14 +216,13 @@ with `--live`, calls `claim()` and prints what arrived.
 | `STOP_LOSS_PCT` | 35 | exit |
 | `TRAILING_PCT` | 25 | exit, measured from the peak |
 | `MAX_HOLD_MIN` | 45 | exit |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | | alerts |
 | `BOARD_PORT` | 4663 | board |
-| `SNIPE_BUDGET_ETH` | 0.05 | ETH a session may spend on entries before it stops firing |
+| `SNIPE_BUDGET_ETH` | 0.05 | live entry value plus conservative burst-gas reservations before firing stops |
 | `SEQUENCER_URL` | official sequencer | write-only `eth_sendRawTransaction` |
-| `FEED_URL` | official feed | optional; `off` disables; always send the sequence-number header |
 | `HELPER_ADDRESS` | | `BodkinBuyOnce` after `helper deploy` |
+| `BODKIN_HELPER_BYTECODE` / `BODKIN_HELPER_RUNTIME_BYTECODE` | committed artifact | advanced custom creation/runtime bytecode; both are required for exact post-deploy verification |
 | `ENTRY_SECOND` | 2 | tax window entry |
-| `BURST_MAX` / `BURST_LEAD_MS` / `BURST_CONNS` | 8 / 150 / 12 | parallel pre-signed sends |
+| `BURST_MAX` / `BURST_LEAD_MS` | 8 / 150 | parallel pre-signed sends over persistent clients for each pinned IP |
 | `EXIT_LADDER` | `34@100,33@300` | on-curve partials |
 | `STALE_SEC` / `STALE_MIN_PROGRESS` | 90 / 0.02 | on-curve stale exit |
 | `MIN_TAXED_BUYERS_S1` / `MAX_EXEMPT_BUYS_S0` | 0 / 32 | live gate |
@@ -231,11 +231,15 @@ with `--live`, calls `claim()` and prints what arrived.
 | `REF_FOMO` | phosphenq | FOMO code for the same sign-up link; empty drops it |
 | `NO_COLOR` | | plain output; `FORCE_COLOR=1` keeps colors when piping |
 
+Configured URLs, addresses, booleans, finite percentages, integer widths, ladder entries and supported ranges are validated before a command starts. A present malformed value is an error rather than a silent fallback.
+
 ## Files
 
 | Path | What |
 |---|---|
-| `data/positions.json` | every position the engine opened, with marks and exits |
+| `data/bodkin.redb` | authoritative ACID positions and durable transaction-operation journal; also enforces one writer process |
+| `data/positions.json` | atomic human-readable position export; imported only if redb has no position snapshot |
+| `data/transactions.json` | best-effort human-readable operation export; imported only if redb has no operations |
 | `data/launches.jsonl` | one line per launch `hunt` presented |
-| `data/outcomes.jsonl` | launch_seen / attempt / fire / mark / exit |
+| `data/outcomes.jsonl` | schema-2 launch/gate/submission/attempt/fire/exit/exit-failure observations with run, sequence, chain, version and replay provenance |
 | `.env` | your settings and, if you trade live, your key; git-ignored |

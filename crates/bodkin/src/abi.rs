@@ -1,11 +1,10 @@
 //! pons v2 + Uniswap v4 ABIs. Sources: live factory / verified Blockscout + contractsV2 repo.
 #![allow(non_snake_case, clippy::all)]
 
-use alloy::primitives::{b256, B256};
+use alloy::primitives::{B256, b256};
 use alloy::sol;
 
 sol! {
-    #[sol(rpc)]
     contract factory {
         struct LaunchedToken {
             address token;
@@ -51,7 +50,6 @@ sol! {
         event SnipeTaxSecondsUpdated(uint256 seconds_);
     }
 
-    #[sol(rpc)]
     contract curve {
         function buy(uint256 quoteIn, uint256 minTokensOut, address recipient) payable returns (uint256 tokensOut);
         function sell(uint256 tokensIn, uint256 minQuoteOut, address recipient) returns (uint256 quoteOut);
@@ -75,11 +73,8 @@ sol! {
         event CurveSell(address indexed seller, address indexed recipient, uint256 tokensIn, uint256 quoteOut, uint256 fee, uint256 tax);
         event CurveBuyRefunded(address indexed recipient, uint256 refundAmount);
         event CurveCompleted();
-        event SnipeTaxExempted(address indexed account);
-        event SnipeTaxCharged(address indexed buyer, address indexed recipient, uint256 taxBps, uint256 taxPaid);
     }
 
-    #[sol(rpc)]
     contract token {
         struct Socials {
             string twitter;
@@ -99,7 +94,6 @@ sol! {
         event Transfer(address indexed from, address indexed to, uint256 value);
     }
 
-    #[sol(rpc)]
     contract escrow {
         function balanceOf(address recipient) view returns (uint256);
         function claim() returns (uint256 amount);
@@ -107,7 +101,6 @@ sol! {
         event Claimed(address indexed recipient, uint256 amount);
     }
 
-    #[sol(rpc)]
     contract router {
         struct Socials {
             string twitter;
@@ -131,17 +124,14 @@ sol! {
         function launchAndBuy(TokenParams params, uint256 launchConfigId, address pairToken, uint256 quoteIn, uint256 minTokensOut, address recipient, address[] snipeTaxExemptions) payable returns (address token, address curve, uint256 tokensOut);
     }
 
-    #[sol(rpc)]
     contract deployer {
         function predictLaunchAddresses(bytes32 salt, address pairToken, uint256 launchConfigId) view returns (address token, address curve);
     }
 
-    #[sol(rpc)]
     contract helper {
         function buyOnce(address curve, address token, address recipient, uint256 maxTaxBps, uint256 minTokensOut, uint256 maxRealQuote) payable returns (uint256 tokensOut);
     }
 
-    #[sol(rpc)]
     contract multicall3 {
         struct Call3 {
             address target;
@@ -155,7 +145,6 @@ sol! {
         function aggregate3(Call3[] calldata calls) payable returns (Result[] memory returnData);
     }
 
-    #[sol(rpc)]
     contract v4Quoter {
         struct PoolKey {
             address currency0;
@@ -173,25 +162,25 @@ sol! {
         function quoteExactInputSingle(QuoteExactSingleParams params) returns (uint256 amountOut, uint256 gasEstimate);
     }
 
-    #[sol(rpc)]
     contract stateView {
-        function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee);
         function getLiquidity(bytes32 poolId) view returns (uint128 liquidity);
     }
 
-    #[sol(rpc)]
     contract universalRouter {
         function execute(bytes commands, bytes[] inputs, uint256 deadline) payable;
     }
 
-    #[sol(rpc)]
+    contract poolManager {
+        event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee);
+    }
+
     contract permit2 {
         function approve(address token, address spender, uint160 amount, uint48 expiration);
         function allowance(address user, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce);
     }
 }
 
-/// keccak of `SnipeTaxCharged(address,address,uint256,uint256)` as seen on the live curve.
+/// Verified live opening-tax topic; its unindexed data is `(uint256 taxBps, uint256 taxPaid)`.
 pub const TOPIC_SNIPE_TAX_CHARGED: B256 =
     b256!("0x3bc39a5562b28f5fe8f36cecabfbaa12bb969acf05717994709225fc412a9934");
 
@@ -212,9 +201,6 @@ pub mod topics {
     pub fn pool_graduated() -> B256 {
         factory::PoolGraduated::SIGNATURE_HASH
     }
-    pub fn snipe_tax_exempted() -> B256 {
-        curve::SnipeTaxExempted::SIGNATURE_HASH
-    }
 }
 
 pub mod selectors {
@@ -223,8 +209,4 @@ pub mod selectors {
     pub fn launch_and_buy() -> [u8; 4] {
         router::launchAndBuyCall::SELECTOR
     }
-}
-
-pub fn launch_and_buy_selector() -> [u8; 4] {
-    selectors::launch_and_buy()
 }

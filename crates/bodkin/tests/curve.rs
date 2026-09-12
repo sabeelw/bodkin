@@ -1,5 +1,8 @@
-use alloy::primitives::{address, U256};
-use bodkin::pons::curve::{amount_out, effective_opening_bps, fdv_quote, min_out_from_rate, progress, quote_buy, quote_sell, spot_price, CurveState};
+use alloy::primitives::{U256, address};
+use bodkin::pons::curve::{
+    CurveState, amount_out, effective_opening_bps, fdv_quote, min_out_from_rate, progress,
+    quote_buy, quote_sell, spot_price,
+};
 
 fn fresh(over: impl FnOnce(&mut CurveState)) -> CurveState {
     let mut s = CurveState {
@@ -16,6 +19,8 @@ fn fresh(over: impl FnOnce(&mut CurveState)) -> CurveState {
         ready_to_graduate: false,
         launched_at: 0,
         read_at_ms: 0,
+        read_block: 0,
+        read_chain_ts: 0,
         snipe_tax_start_bps: U256::from(9900u64),
         snipe_tax_seconds: U256::from(3u64),
     };
@@ -38,7 +43,8 @@ fn round_trip_loses_more_than_the_fee() {
     let spend = U256::from(10u128.pow(17));
     let q = quote_buy(&s, spend);
     let mut after = s.clone();
-    after.quote_reserve = s.quote_reserve + spend - (spend * U256::from(200u64) / U256::from(10_000u64));
+    after.quote_reserve =
+        s.quote_reserve + spend - (spend * U256::from(200u64) / U256::from(10_000u64));
     after.token_reserve = s.token_reserve - q.tokens_out;
     let back = quote_sell(&after, q.tokens_out);
     assert!(back < spend);
@@ -47,14 +53,26 @@ fn round_trip_loses_more_than_the_fee() {
 
 #[test]
 fn opening_tax_capped_so_buyer_nets_1_percent() {
-    assert_eq!(effective_opening_bps(&fresh(|s| s.opening_tax_bps = U256::from(9_900u64))), U256::from(9_700u64));
-    assert_eq!(effective_opening_bps(&fresh(|s| s.opening_tax_bps = U256::from(250u64))), U256::from(250u64));
-    assert_eq!(effective_opening_bps(&fresh(|s| s.opening_tax_bps = U256::ZERO)), U256::ZERO);
+    assert_eq!(
+        effective_opening_bps(&fresh(|s| s.opening_tax_bps = U256::from(9_900u64))),
+        U256::from(9_700u64)
+    );
+    assert_eq!(
+        effective_opening_bps(&fresh(|s| s.opening_tax_bps = U256::from(250u64))),
+        U256::from(250u64)
+    );
+    assert_eq!(
+        effective_opening_bps(&fresh(|s| s.opening_tax_bps = U256::ZERO)),
+        U256::ZERO
+    );
 }
 
 #[test]
 fn ninety_nine_percent_tax_nearly_worthless() {
-    let taxed = quote_buy(&fresh(|s| s.opening_tax_bps = U256::from(9_900u64)), U256::from(10u128.pow(17)));
+    let taxed = quote_buy(
+        &fresh(|s| s.opening_tax_bps = U256::from(9_900u64)),
+        U256::from(10u128.pow(17)),
+    );
     let clean = quote_buy(&fresh(|_| {}), U256::from(10u128.pow(17)));
     assert!(taxed.tokens_out * U256::from(20u64) < clean.tokens_out);
 }
@@ -71,12 +89,29 @@ fn clamp_and_refund() {
 
 #[test]
 fn min_out_progress_fdv() {
-    assert_eq!(min_out_from_rate(U256::from(10_000u64), 300), U256::from(9_700u64));
-    assert!((progress(&fresh(|s| s.real_quote_reserve = U256::from(2_100_000_000_000_000_000u128))) - 0.5).abs() < 1e-9);
-    assert_eq!(progress(&fresh(|s| s.real_quote_reserve = U256::from(9u128) * U256::from(10u128.pow(18)))), 1.0);
+    assert_eq!(
+        min_out_from_rate(U256::from(10_000u64), 300),
+        U256::from(9_700u64)
+    );
+    assert!(
+        (progress(&fresh(
+            |s| s.real_quote_reserve = U256::from(2_100_000_000_000_000_000u128)
+        )) - 0.5)
+            .abs()
+            < 1e-9
+    );
+    assert_eq!(
+        progress(&fresh(
+            |s| s.real_quote_reserve = U256::from(9u128) * U256::from(10u128.pow(18))
+        )),
+        1.0
+    );
     let px = spot_price(&fresh(|_| {}));
     assert!((px - 1.68e-9).abs() < 1e-12);
     assert!((fdv_quote(&fresh(|_| {})) - 1.68).abs() < 1e-6);
-    assert_eq!(amount_out(U256::from(100u64), U256::from(1000u64), U256::from(1000u64)), U256::from(90u64));
+    assert_eq!(
+        amount_out(U256::from(100u64), U256::from(1000u64), U256::from(1000u64)),
+        U256::from(90u64)
+    );
     let _ = address!("0x0000000000000000000000000000000000000000");
 }

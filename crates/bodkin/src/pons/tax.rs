@@ -9,11 +9,7 @@ pub fn snipe_tax_bps(start_bps: u64, window_secs: u64, elapsed_secs: u64) -> u64
         return 0;
     }
     let shift = 14u64.saturating_mul(elapsed_secs) / window_secs;
-    if shift >= 64 {
-        0
-    } else {
-        start_bps >> shift
-    }
+    if shift >= 64 { 0 } else { start_bps >> shift }
 }
 
 /// Unix second at which `entry_second` begins (inclusive). Entry second 2 → `launched_at + 2`.

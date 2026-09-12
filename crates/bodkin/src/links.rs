@@ -20,10 +20,16 @@ impl Links {
         format!("https://robinhoodchain.blockscout.com/token/{token}")
     }
     pub fn axiom(curve: &str) -> String {
-        format!("https://axiom.trade/meme/{}?chain=robinhood", curve.to_ascii_lowercase())
+        format!(
+            "https://axiom.trade/meme/{}?chain=robinhood",
+            curve.to_ascii_lowercase()
+        )
     }
     pub fn fomo(token: &str) -> String {
-        format!("https://fomo.family/tokens/robinhood/{}", token.to_ascii_lowercase())
+        format!(
+            "https://fomo.family/tokens/robinhood/{}",
+            token.to_ascii_lowercase()
+        )
     }
     pub fn axiom_ref(&self) -> String {
         if self.axiom_handle.is_empty() {
@@ -42,7 +48,8 @@ impl Links {
 }
 
 pub fn osc(text: &str, url: &str) -> String {
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout()) || std::env::var_os("FORCE_COLOR").is_some();
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout())
+        || std::env::var_os("FORCE_COLOR").is_some();
     if url.is_empty() || std::env::var_os("NO_COLOR").is_some() || !tty {
         return text.to_string();
     }

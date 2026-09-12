@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <img alt="tests" src="https://img.shields.io/badge/tests-28%20passing-CCFF00?style=flat-square&labelColor=110E08">
+  <img alt="tests" src="https://img.shields.io/badge/tests-104%20passing-CCFF00?style=flat-square&labelColor=110E08">
   <img alt="rustc" src="https://img.shields.io/badge/rustc-%E2%89%A51.91-D9D9D9?style=flat-square&labelColor=110E08">
   <img alt="runtime" src="https://img.shields.io/badge/runtime-one%20binary-D9D9D9?style=flat-square&labelColor=110E08">
   <img alt="chain" src="https://img.shields.io/badge/chain-4663-D9D9D9?style=flat-square&labelColor=110E08">
@@ -54,11 +54,11 @@ it builds `bodkin.exe` on the first run, copies `.env.example` to `.env` when th
 
 | | |
 |---|---|
-| **Required** | rustc ≥ 1.91 (`rustup`) |
-| **Runtime** | one `bodkin` binary (alloy + tokio) |
+| **Required** | pinned rustc 1.91.0 (`rustup`) |
+| **Runtime** | one `bodkin` binary (alloy + tokio + embedded redb; no database service) |
 | **For live trades** | `PRIVATE_KEY` and `HELPER_ADDRESS` in `.env`, ETH on Robinhood Chain (bridge at robinhood.com/chain) |
-| **Detection** | raced websocket `TokenLaunched` (publicnode by default); `RPC_WS_URL=off` for 300 ms polling; optional `FEED_URL` |
-| **Sends** | direct `eth_sendRawTransaction` to `SEQUENCER_URL` (warm HTTP/1.1, IP pin + same-nonce spray). Alloy is not used for send |
+| **Detection** | raced websocket `TokenLaunched` (publicnode by default); `RPC_WS_URL=off` for 300 ms polling |
+| **Sends** | direct `eth_sendRawTransaction` to `SEQUENCER_URL` (persistent warm HTTP/1.1 clients per pinned IP + same-nonce spray). Alloy is not used for send |
 | **Public RPCs** | two by default: publicnode for state reads and the official Robinhood RPC for logs. One gate, no JSON-RPC batches. `RPC_URL=` a private provider carries everything |
 
 Co-locate later, not first: [docs/DEPLOY.md](./docs/DEPLOY.md).
@@ -94,9 +94,11 @@ bodkin snipe --live       # after you have watched it for an hour
 | `claim` | claim your creator fees from the escrow | `--live` only |
 | `helper` | deploy / check `BodkinBuyOnce` | `--live` to broadcast |
 | `outcomes` | summary of `data/outcomes.jsonl` | no |
-| `replay` | sampled launches vs an alternate entry second | no |
+| `replay` | provenance-pinned launch screens + ordered reserve transitions at an alternate entry second | no |
 
 Every flag and environment variable: [docs/COMMANDS.md](./docs/COMMANDS.md).
+
+Local portfolio and operation state is ACID and crash-recovered in `data/bodkin.redb`. redb also refuses concurrent engines/live commands against the same directory. `positions.json` and `transactions.json` are atomic human-readable exports, not editable state.
 
 ## hunt
 
@@ -155,7 +157,7 @@ defaults even when everything else about it looks good. Relax `maxExemptWallets`
 
 On-curve exits: ladder (`EXIT_LADDER`, default 34 % at +100 %, 33 % at +300 %), stale curve, insider sell. After graduation: take profit +80 %, stop loss −35 %, trailing 25 % below the peak, max hold 45 min. Marks are real quotes for the whole position.
 Four walls around a live session: a confirmation that prints your address, balance and limits and waits for you to type `arm`; the size
-per buy; the position cap; and a **session budget** (`--budget`, 0.05 ETH by default) after which nothing fires, whatever the score.
+per buy; the position cap; and a **session budget** (`--budget`, 0.05 ETH by default) that reserves live entry value plus worst-case burst gas before anything fires.
 The rules, the score and where every number comes from: [docs/STRATEGY.md](./docs/STRATEGY.md); what can go wrong: [docs/SAFETY.md](./docs/SAFETY.md).
 
 Symbols and contracts in the terminal are links (Ctrl+click in Windows Terminal, iTerm2, kitty, VS Code): the symbol opens the launch
@@ -208,14 +210,14 @@ flowchart LR
     P --> X["ladder / stale / insider"]
 ```
 
-- Detection is a raced websocket subscription to `TokenLaunched`, with a watchdog that walks last-seen → head after 45 s of silence. Optional `FEED_URL` decodes `launchAndBuy` calldata and CREATE2-predicts token/curve. There is no mempool.
-- Enrichment is one Multicall3 including the curve's snapshotted tax params. Dev buy from `CurveBuy` in the launch tx; exemptions from calldata (declared length, zeros kept) with `SnipeTaxExempted` as fallback. Missing launch tx is a refuse.
-- Sends go to the sequencer over warm HTTP/1.1 (`TCP_NODELAY`, 15 s timeout). Pin the fastest of the three us-east-2 IPs; spray nonce 0 of the burst at the other two. `eth_sendRawTransactionSync` is confirmation-only after a fill. Conditional is a `doctor --probe`, not the fire path.
+- Detection is a raced websocket subscription to `TokenLaunched`, with a watchdog that walks last-seen → head after 45 s of silence. There is no mempool or unverified sequencer-feed path.
+- Enrichment is one Multicall3 including the curve's snapshotted tax params. Dev buy comes from matching `CurveBuy` logs; exemptions come strictly from decoded `launchAndBuy` calldata, preserving declared length and zero entries. Missing or mismatched launch transactions refuse.
+- Sends use persistent warm HTTP/1.1 clients (`TCP_NODELAY`, 15 s timeout), one per resolved sequencer IP. Nonce 0 is sprayed across the pinned set; every response is receipt-confirmed against the canonical block hash. `eth_sendRawTransactionSync` is confirmation-only after a fill. Conditional is a `doctor --probe`, not the fire path.
 - Deployer records come from an in-memory index of ~2 days of launches, built on the background lane.
 - Curve math is the protocol's integer order. `minTokensOut` is sized as if this buy is last in the entry block.
 - Graduation: reserved supply is 28.57 %, but the v4 pool gets **20.41 % + 4.2 ETH**; 8.16 % is permanently locked.
 
-More in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md), what can go wrong in [docs/SAFETY.md](./docs/SAFETY.md).
+See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md), [docs/SAFETY.md](./docs/SAFETY.md), and [AGENTS.md](./AGENTS.md) for implementation guidance.
 
 ## Numbers behind the defaults (2026-09-03, mainnet)
 
@@ -236,9 +238,7 @@ More in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md), what can go wrong in [do
 cargo test
 ```
 
-No network. The curve quote reproduces the 3.00 % dev buy that 0.0535 ETH gives on a fresh curve, the live tax staircase, the score on a
-builder-shaped launch and on a serial deployer, the sniper's refusals, the launch-farm fingerprint, session budget, the unreadable-launch
-path, the limiter, the deployer index, burst classify, ladder / stale / insider, and v4 ETH-is-currency0.
+The 104-test suite uses no external network. It covers strict configuration and RPC body/cancellation lifetimes, curve/tax/score properties, reversible event ordering and reorg gaps, atomic admission, receipt canonicality, gas-aware partial exits, redb restart recovery, claim/helper verification, provenance-pinned no-lookahead replay, board snapshot/idempotency security, and ANSI/OSC sanitization. `cargo bench --bench hot_paths` measures the pure entry hot paths. On the pinned Rust 1.91 reference run, median curve quote was 68.8 ns, last-in-block sizing 174 ns, and cloning the persistent HTTP client 29.6 ns versus 2.49 µs to construct a new client.
 
 ## FAQ
 

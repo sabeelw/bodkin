@@ -22,5 +22,5 @@ pub mod view;
 
 pub use chain::{ADDR, CHAIN_ID, ZERO};
 pub use config::Config;
-pub use engine::{decide, live_gate, rules_from_env, Decision, SnipeRules};
-pub use score::{score_launch, Score, ScoreContext, Verdict};
+pub use engine::{Decision, SnipeRules, decide, live_gate, rules_from_env, try_rules_from_env};
+pub use score::{Score, ScoreContext, Verdict, score_launch};

@@ -40,7 +40,10 @@ impl DeployerIndex {
             return;
         }
         self.token_deployer.insert(t.clone(), d.clone());
-        self.launches.entry(d).or_default().push((ev.block_number, t));
+        self.launches
+            .entry(d)
+            .or_default()
+            .push((ev.block_number, t));
     }
 
     pub fn mark_graduated(&mut self, token: Address) {
@@ -61,31 +64,33 @@ impl DeployerIndex {
             return None;
         }
         let d = format!("{deployer:#x}");
+        let floor = before_block.saturating_sub(self.window_blocks);
         let list: Vec<_> = self
             .launches
             .get(&d)
             .into_iter()
             .flatten()
-            .filter(|(b, _)| *b < before_block)
+            .filter(|(b, _)| *b < before_block && *b >= floor)
             .collect();
         let prior = list.len() as u32;
-        let graduated = list.iter().filter(|(_, t)| self.graduated_tokens.contains(t)).count() as u32;
+        let graduated = list
+            .iter()
+            .filter(|(_, t)| self.graduated_tokens.contains(t))
+            .count() as u32;
         Some((prior, graduated))
     }
 
     pub fn size(&self) -> (usize, usize, usize) {
-        (self.launches.len(), self.token_deployer.len(), self.graduated_tokens.len())
+        (
+            self.launches.len(),
+            self.token_deployer.len(),
+            self.graduated_tokens.len(),
+        )
     }
 
     pub fn mark_ready(&mut self) {
         self.ready = true;
     }
-}
-
-/// Small semaphore: enrichment of a burst of launches runs `n` at a time.
-pub fn limiter(n: usize) -> impl Fn(std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    let _ = n;
-    move |f| f
 }
 
 pub struct Limiter {
@@ -94,7 +99,9 @@ pub struct Limiter {
 
 impl Limiter {
     pub fn new(n: usize) -> Self {
-        Self { sem: Arc::new(Semaphore::new(n)) }
+        Self {
+            sem: Arc::new(Semaphore::new(n)),
+        }
     }
 
     pub async fn run<T, F, Fut>(&self, f: F) -> T

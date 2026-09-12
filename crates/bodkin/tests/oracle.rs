@@ -1,18 +1,16 @@
 //! Ports of legacy/test/{score,engine,v4,links}.test.ts. If these fail, the rewrite drifted.
 
-use alloy::primitives::{address, Address, U256};
+use alloy::primitives::{Address, U256, address};
 use bodkin::engine::{decide, live_gate, rules_from_env};
-use bodkin::links::{osc, ref_line, Links};
+use bodkin::links::{Links, osc, ref_line};
 use bodkin::pons::curve::CurveState;
 use bodkin::pons::deployer::DeployerIndex;
 use bodkin::pons::enrich::{LaunchIntel, LaunchRecord, LaunchTx, PairInfo, Socials, TokenMeta};
 use bodkin::pons::fingerprint::FarmDetector;
 use bodkin::pons::launches::LaunchEvent;
 use bodkin::pons::stream::{FlowSnapshot, FlowTracker};
-use bodkin::score::{score_launch, ScoreContext, Verdict};
-use bodkin::trade::burst::{classify_send, BurstClass};
-use bodkin::trade::positions::{exit_reason, ExitLadder, ExitRules, Position};
-use bodkin::trade::submitter::SendOutcome;
+use bodkin::score::{ScoreContext, Verdict, score_launch};
+use bodkin::trade::positions::{ExitLadder, ExitRules, Position, exit_reason};
 use bodkin::trade::v4::{pons_pool_key, pool_id};
 
 const ZERO: Address = Address::ZERO;
@@ -30,7 +28,6 @@ fn ev() -> LaunchEvent {
         block_number: 53_000_000,
         tx_hash: Default::default(),
         log_index: 0,
-        seen_at_ms: 0,
     }
 }
 
@@ -40,28 +37,20 @@ fn builder() -> LaunchIntel {
         meta: Some(TokenMeta {
             name: "Night Shift Harness".into(),
             symbol: "SHIFT".into(),
-            logo: "ipfs://x".into(),
             description: "A local agent harness that works the night shift on your tasks so you do not have to".into(),
             socials: Socials {
                 twitter: "https://x.com/example/status/1".into(),
                 telegram: String::new(),
-                discord: String::new(),
                 website: "https://github.com/example/shift".into(),
-                farcaster: String::new(),
             },
         }),
         record: Some(LaunchRecord {
             creator_fee_recipient: B,
             creator_tax_bps: 100,
             phase: 0,
-            pool_fee: 0,
-            tick_spacing: 200,
-            buyback_enabled: false,
         }),
         tx: Some(LaunchTx {
             from: A,
-            to: ZERO,
-            value_wei: U256::ZERO,
             dev_buy_wei: U256::from(53_519_145_802_650_970u128),
             dev_tokens: U256::from(30_000_000u128) * U256::from(10u128.pow(18)),
             exemptions: vec![A, B, ZERO, ZERO],
@@ -82,6 +71,8 @@ fn builder() -> LaunchIntel {
             ready_to_graduate: false,
             launched_at: 1_788_397_521,
             read_at_ms: 0,
+            read_block: 0,
+            read_chain_ts: 0,
             snipe_tax_start_bps: U256::from(9900u64),
             snipe_tax_seconds: U256::from(3u64),
         }),
@@ -93,7 +84,13 @@ fn builder() -> LaunchIntel {
 
 #[test]
 fn builder_shaped_launch_scores_fire() {
-    let s = score_launch(&builder(), &ScoreContext { deployer: Some((0, 0)), ..Default::default() });
+    let s = score_launch(
+        &builder(),
+        &ScoreContext {
+            deployer: Some((0, 0)),
+            ..Default::default()
+        },
+    );
     assert_eq!(s.verdict, Verdict::Fire);
     assert!(s.reasons.iter().any(|r| r.contains("third party")));
     assert!(s.reasons.iter().any(|r| r.contains("declared bundle")));
@@ -105,7 +102,13 @@ fn serial_deployer_no_socials_is_skip() {
     if let Some(m) = &mut i.meta {
         m.socials = Socials::default();
     }
-    let s = score_launch(&i, &ScoreContext { deployer: Some((185, 0)), ..Default::default() });
+    let s = score_launch(
+        &i,
+        &ScoreContext {
+            deployer: Some((185, 0)),
+            ..Default::default()
+        },
+    );
     assert_eq!(s.verdict, Verdict::Skip);
 }
 
@@ -135,7 +138,13 @@ fn telegram_scores_same_as_website() {
 #[test]
 fn sniper_refuses_four_exempt_by_default() {
     let rules = rules_from_env();
-    let s = score_launch(&builder(), &ScoreContext { deployer: Some((0, 0)), ..Default::default() });
+    let s = score_launch(
+        &builder(),
+        &ScoreContext {
+            deployer: Some((0, 0)),
+            ..Default::default()
+        },
+    );
     let d = decide(&builder(), &s, &rules, 0, 0, U256::ZERO);
     assert!(!d.fire);
     assert!(d.why.iter().any(|w| w.contains("exempt wallets")));
@@ -145,11 +154,22 @@ fn sniper_refuses_four_exempt_by_default() {
 fn fires_when_bundle_relaxed_stops_at_cap() {
     let mut rules = rules_from_env();
     rules.max_exempt_wallets = 4;
-    let s = score_launch(&builder(), &ScoreContext { deployer: Some((0, 0)), ..Default::default() });
+    let s = score_launch(
+        &builder(),
+        &ScoreContext {
+            deployer: Some((0, 0)),
+            ..Default::default()
+        },
+    );
     assert!(decide(&builder(), &s, &rules, 0, 0, U256::ZERO).fire);
     assert!(!decide(&builder(), &s, &rules, 3, 0, U256::ZERO).fire);
     let mut usd = builder();
-    usd.pair = PairInfo { address: A, symbol: "USDG".into(), decimals: 6, usd_per_unit: Some(1.0) };
+    usd.pair = PairInfo {
+        address: A,
+        symbol: "USDG".into(),
+        decimals: 6,
+        usd_per_unit: Some(1.0),
+    };
     assert!(!decide(&usd, &s, &rules, 0, 0, U256::ZERO).fire);
 }
 
@@ -175,7 +195,7 @@ async fn limiter_runs_at_most_n() {
             }
         }));
     }
-    let out = futures::future::join_all(futs).await;
+    let out = futures_util::future::join_all(futs).await;
     assert_eq!(out, vec![1, 2, 3, 4, 5]);
     assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
@@ -193,14 +213,25 @@ fn deployer_index_from_memory() {
         block_number: block,
         tx_hash: Default::default(),
         log_index: 0,
-        seen_at_ms: 0,
     };
     assert!(idx.quick(A, 100).is_none());
     idx.mark_ready();
-    idx.note(&ev(address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), 10));
-    idx.note(&ev(address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), 20));
-    idx.note(&ev(address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), 20));
-    idx.note(&ev(address!("0xcccccccccccccccccccccccccccccccccccccccc"), 30));
+    idx.note(&ev(
+        address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        10,
+    ));
+    idx.note(&ev(
+        address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        20,
+    ));
+    idx.note(&ev(
+        address!("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        20,
+    ));
+    idx.note(&ev(
+        address!("0xcccccccccccccccccccccccccccccccccccccccc"),
+        30,
+    ));
     idx.mark_graduated(address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     assert_eq!(idx.quick(A, 25), Some((2, 1)));
     assert_eq!(idx.quick(A, 5), Some((0, 0)));
@@ -237,14 +268,56 @@ fn launch_farm_three_wallets() {
         i
     };
     assert_eq!(farms.note(&base, 1_000).0, 0);
+    // Same (deployer, token) noted again — a backfill/live double-delivery —
+    // counts once, not as a second farm twin.
     assert_eq!(farms.note(&base, 2_000).0, 0);
-    assert_eq!(farms.note(&other(address!("0x2222222222222222222222222222222222222222")), 3_000).0, 2);
-    assert_eq!(farms.note(&other(address!("0x3333333333333333333333333333333333333333")), 4_000).0, 3);
-    assert_eq!(farms.note(&other(address!("0x4444444444444444444444444444444444444444")), 4_000 + 31 * 60_000).0, 0);
-    let s = score_launch(&base, &ScoreContext { farm_twins: 3, ..Default::default() });
+    assert_eq!(
+        farms
+            .note(
+                &other(address!("0x2222222222222222222222222222222222222222")),
+                3_000
+            )
+            .0,
+        1
+    );
+    assert_eq!(
+        farms
+            .note(
+                &other(address!("0x3333333333333333333333333333333333333333")),
+                4_000
+            )
+            .0,
+        2
+    );
+    assert_eq!(
+        farms
+            .note(
+                &other(address!("0x4444444444444444444444444444444444444444")),
+                4_000 + 31 * 60_000
+            )
+            .0,
+        0
+    );
+    let s = score_launch(
+        &base,
+        &ScoreContext {
+            farm_twins: 3,
+            ..Default::default()
+        },
+    );
     assert!(s.reasons.iter().any(|r| r.starts_with("-25 launch farm")));
-    assert!(decide(&base, &s, &rules_from_env(), 0, 3, U256::ZERO).why.iter().any(|w| w.starts_with("launch farm")));
-    assert!(!decide(&base, &s, &rules_from_env(), 0, 1, U256::ZERO).why.iter().any(|w| w.starts_with("launch farm")));
+    assert!(
+        decide(&base, &s, &rules_from_env(), 0, 3, U256::ZERO)
+            .why
+            .iter()
+            .any(|w| w.starts_with("launch farm"))
+    );
+    assert!(
+        !decide(&base, &s, &rules_from_env(), 0, 1, U256::ZERO)
+            .why
+            .iter()
+            .any(|w| w.starts_with("launch farm"))
+    );
 }
 
 #[test]
@@ -270,10 +343,23 @@ fn session_budget_stops_firing() {
     let mut rules = rules_from_env();
     rules.session_budget_wei = U256::from(25u64) * U256::from(10u128.pow(15));
     rules.eth_per_buy = U256::from(10u128.pow(16));
-    let s = score_launch(&base, &ScoreContext { deployer: Some((0, 0)), ..Default::default() });
+    let s = score_launch(
+        &base,
+        &ScoreContext {
+            deployer: Some((0, 0)),
+            ..Default::default()
+        },
+    );
     assert!(decide(&base, &s, &rules, 0, 0, U256::ZERO).fire);
     assert!(decide(&base, &s, &rules, 0, 0, U256::from(10u128.pow(16))).fire);
-    let third = decide(&base, &s, &rules, 0, 0, U256::from(2u128) * U256::from(10u128.pow(16)));
+    let third = decide(
+        &base,
+        &s,
+        &rules,
+        0,
+        0,
+        U256::from(2u128) * U256::from(10u128.pow(16)),
+    );
     assert!(!third.fire);
     assert!(third.why[0].starts_with("session budget"));
 }
@@ -295,7 +381,14 @@ fn unreadable_launch_refused_as_unreadable() {
         errors: vec!["tx: HTTP 429 after 5 tries".into()],
         fee_recipient_is_contract: None,
     };
-    let d = decide(&intel, &score_launch(&intel, &ScoreContext::default()), &rules_from_env(), 0, 0, U256::ZERO);
+    let d = decide(
+        &intel,
+        &score_launch(&intel, &ScoreContext::default()),
+        &rules_from_env(),
+        0,
+        0,
+        U256::ZERO,
+    );
     assert!(!d.fire);
     assert_eq!(d.why.len(), 1);
     assert!(d.why[0].starts_with("unreadable: tx: HTTP 429"));
@@ -312,28 +405,73 @@ fn exit_rules_tp_sl_trail_hold() {
         opened_at: 1_000,
         entry_tx: None,
         dry_run: true,
+        chain_id: 0,
+        wallet: String::new(),
         entry_eth: U256::from(10u128.pow(18)).to_string(),
+        entry_gas_wei: None,
+        basis_gas_wei: None,
+        overhead_gas_wei: None,
+        overhead_operations: Vec::new(),
         tokens: "1".into(),
+        basis_eth: None,
         peak_eth: U256::from(10u128.pow(18)).to_string(),
         last_eth: U256::from(10u128.pow(18)).to_string(),
         last_at: 1_000,
         status: "open".into(),
         exits: vec![],
     };
-    let rules = ExitRules { take_profit_pct: 80.0, stop_loss_pct: 35.0, trailing_pct: 25.0, max_hold_min: 45.0 };
+    let rules = ExitRules {
+        take_profit_pct: 80.0,
+        stop_loss_pct: 35.0,
+        trailing_pct: 25.0,
+        max_hold_min: 45.0,
+    };
     assert!(exit_reason(&base, U256::from(10u128.pow(18)), &rules, 1_100).is_none());
-    assert!(exit_reason(&base, U256::from(19u64) * U256::from(10u128.pow(17)), &rules, 1_100).unwrap().contains("take profit"));
-    assert!(exit_reason(&base, U256::from(6u64) * U256::from(10u128.pow(17)), &rules, 1_100).unwrap().contains("stop loss"));
+    assert!(
+        exit_reason(
+            &base,
+            U256::from(19u64) * U256::from(10u128.pow(17)),
+            &rules,
+            1_100
+        )
+        .unwrap()
+        .contains("take profit")
+    );
+    assert!(
+        exit_reason(
+            &base,
+            U256::from(6u64) * U256::from(10u128.pow(17)),
+            &rules,
+            1_100
+        )
+        .unwrap()
+        .contains("stop loss")
+    );
     let mut peaked = base.clone();
     peaked.peak_eth = (U256::from(16u64) * U256::from(10u128.pow(17))).to_string();
-    assert!(exit_reason(&peaked, U256::from(11u64) * U256::from(10u128.pow(17)), &rules, 1_100).unwrap().contains("trailing"));
-    assert!(exit_reason(&base, U256::from(10u128.pow(18)), &rules, 1_000 + 46 * 60).unwrap().contains("max hold"));
+    assert!(
+        exit_reason(
+            &peaked,
+            U256::from(11u64) * U256::from(10u128.pow(17)),
+            &rules,
+            1_100
+        )
+        .unwrap()
+        .contains("trailing")
+    );
+    assert!(
+        exit_reason(&base, U256::from(10u128.pow(18)), &rules, 1_000 + 46 * 60)
+            .unwrap()
+            .contains("max hold")
+    );
 }
 
 #[test]
 fn ladder_and_stale_and_insider() {
     let mut rules = rules_from_env();
-    rules.ladder = ExitLadder { rungs: vec![(34, 100), (33, 300)] };
+    rules.ladder = ExitLadder {
+        rungs: vec![(34, 100), (33, 300)],
+    };
     rules.stale_sec = 90;
     rules.stale_min_progress = 0.02;
     let pos = Position {
@@ -345,22 +483,56 @@ fn ladder_and_stale_and_insider() {
         opened_at: 1_000,
         entry_tx: None,
         dry_run: true,
+        chain_id: 0,
+        wallet: String::new(),
         entry_eth: U256::from(10u128.pow(18)).to_string(),
+        entry_gas_wei: None,
+        basis_gas_wei: None,
+        overhead_gas_wei: None,
+        overhead_operations: Vec::new(),
         tokens: "1".into(),
+        basis_eth: None,
         peak_eth: U256::from(10u128.pow(18)).to_string(),
         last_eth: U256::from(10u128.pow(18)).to_string(),
         last_at: 1_000,
         status: "open".into(),
         exits: vec![],
     };
-    let hit = rules.ladder.hit(&pos, U256::from(2u64) * U256::from(10u128.pow(18))).unwrap();
+    let hit = rules
+        .ladder
+        .hit(&pos, U256::from(2u64) * U256::from(10u128.pow(18)))
+        .unwrap();
     assert!(hit.reason.contains("ladder +100%"));
     assert_eq!(hit.fraction_bps, 3400);
-    let flow = FlowSnapshot { insider_sold: true, ..Default::default() };
-    let act = bodkin::engine::pick_exit(&pos, U256::from(10u128.pow(18)), &rules, Some(&flow), 1_010, false, 0.01).unwrap();
+    let flow = FlowSnapshot {
+        insider_sold: true,
+        ..Default::default()
+    };
+    let act = bodkin::engine::pick_exit(
+        &pos,
+        U256::from(10u128.pow(18)),
+        &rules,
+        Some(&flow),
+        1_010,
+        false,
+        0.01,
+    )
+    .unwrap();
     assert_eq!(act.reason, "insider sold");
-    let flow = FlowSnapshot { insider_sold: false, ..Default::default() };
-    let stale = bodkin::engine::pick_exit(&pos, U256::from(10u128.pow(18)), &rules, Some(&flow), 1_000 + 91, false, 0.01).unwrap();
+    let flow = FlowSnapshot {
+        insider_sold: false,
+        ..Default::default()
+    };
+    let stale = bodkin::engine::pick_exit(
+        &pos,
+        U256::from(10u128.pow(18)),
+        &rules,
+        Some(&flow),
+        1_000 + 91,
+        false,
+        0.01,
+    )
+    .unwrap();
     assert!(stale.reason.starts_with("stale"));
 }
 
@@ -370,19 +542,32 @@ fn live_gate_taxed_and_exempt() {
     rules.min_taxed_buyers_s1 = 3;
     rules.max_exempt_buys_s0 = 1;
     rules.abort_if_insider_sold = true;
-    let ok = FlowSnapshot { taxed_buyers_s1: 3, exempt_buys_s0: 0, insider_sold: false, ..Default::default() };
+    let ok = FlowSnapshot {
+        taxed_buyers_s1: 3,
+        exempt_buys_s0: 0,
+        insider_sold: false,
+        ..Default::default()
+    };
     assert!(live_gate(&rules, &ok).fire);
-    let no = FlowSnapshot { taxed_buyers_s1: 1, exempt_buys_s0: 0, insider_sold: false, ..Default::default() };
+    let no = FlowSnapshot {
+        taxed_buyers_s1: 1,
+        exempt_buys_s0: 0,
+        insider_sold: false,
+        ..Default::default()
+    };
     assert!(!live_gate(&rules, &no).fire);
-    let sold = FlowSnapshot { taxed_buyers_s1: 3, exempt_buys_s0: 0, insider_sold: true, ..Default::default() };
-    assert!(live_gate(&rules, &sold).why.iter().any(|w| w.contains("insider")));
-}
-
-#[test]
-fn burst_classify() {
-    assert_eq!(classify_send(&SendOutcome::Hash(Default::default()), true), BurstClass::Fill);
-    assert_eq!(classify_send(&SendOutcome::Known, false), BurstClass::LateDup);
-    assert_eq!(classify_send(&SendOutcome::Revert { hash: None, message: "tax".into() }, false), BurstClass::HelperRevert);
+    let sold = FlowSnapshot {
+        taxed_buyers_s1: 3,
+        exempt_buys_s0: 0,
+        insider_sold: true,
+        ..Default::default()
+    };
+    assert!(
+        live_gate(&rules, &sold)
+            .why
+            .iter()
+            .any(|w| w.contains("insider"))
+    );
 }
 
 #[test]
@@ -394,21 +579,36 @@ fn pons_pool_key_eth_is_currency0() {
     assert_eq!(k.fee, 0);
     assert_eq!(k.tick_spacing, 200);
     let id = pool_id(&k);
-    assert_ne!(id, pool_id(&bodkin::trade::v4::pons_pool_key(token, ZERO, 60)));
+    assert_ne!(
+        id,
+        pool_id(&bodkin::trade::v4::pons_pool_key(token, ZERO, 60))
+    );
 }
 
 #[test]
 fn axiom_keyed_by_curve() {
     let token = "0x6219c797646FD54EdDE1497f66d3F76a2Bb67F81";
     let curve = "0x38B9A9d9DB16c302c30a1046AB2d4B11Fc1f668B";
-    assert_eq!(Links::axiom(curve), "https://axiom.trade/meme/0x38b9a9d9db16c302c30a1046ab2d4b11fc1f668b?chain=robinhood");
-    assert_eq!(Links::fomo(token), "https://fomo.family/tokens/robinhood/0x6219c797646fd54edde1497f66d3f76a2bb67f81");
-    assert_eq!(Links::pons(token), format!("https://www.ponsfamily.com/token/{token}"));
+    assert_eq!(
+        Links::axiom(curve),
+        "https://axiom.trade/meme/0x38b9a9d9db16c302c30a1046ab2d4b11fc1f668b?chain=robinhood"
+    );
+    assert_eq!(
+        Links::fomo(token),
+        "https://fomo.family/tokens/robinhood/0x6219c797646fd54edde1497f66d3f76a2bb67f81"
+    );
+    assert_eq!(
+        Links::pons(token),
+        format!("https://www.ponsfamily.com/token/{token}")
+    );
 }
 
 #[test]
 fn empty_handles_drop_signup() {
-    let links = Links { axiom_handle: String::new(), fomo_handle: String::new() };
+    let links = Links {
+        axiom_handle: String::new(),
+        fomo_handle: String::new(),
+    };
     assert!(links.axiom_ref().is_empty());
     assert!(links.fomo_ref().is_empty());
     assert!(ref_line(&links).is_empty());
@@ -426,7 +626,7 @@ fn tax_staircase_live() {
 #[test]
 fn flow_tracker_compiles_watch() {
     let mut f = FlowTracker::default();
-    f.watch(A, 100, [A]);
+    f.watch(A, 100, 0, [A]);
     let s = f.snapshot(A);
     assert_eq!(s.buys, 0);
 }

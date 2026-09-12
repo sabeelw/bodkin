@@ -1,5 +1,5 @@
 use crate::pons::curve::progress;
-use crate::pons::enrich::{dev_share_pct, has_socials, CurveActivity, LaunchIntel};
+use crate::pons::enrich::{CurveActivity, LaunchIntel, dev_share_pct, has_socials};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -54,7 +54,14 @@ pub fn score_launch(intel: &LaunchIntel, ctx: &ScoreContext) -> Score {
     let mut r = Vec::new();
     let mut add = |pts: i32, why: &str| {
         s += pts;
-        r.push(format!("{} {why}", if pts >= 0 { format!("+{pts}") } else { pts.to_string() }));
+        r.push(format!(
+            "{} {why}",
+            if pts >= 0 {
+                format!("+{pts}")
+            } else {
+                pts.to_string()
+            }
+        ));
     };
 
     let dev = dev_share_pct(intel.tx.as_ref());
@@ -77,16 +84,32 @@ pub fn score_launch(intel: &LaunchIntel, ctx: &ScoreContext) -> Score {
         if tax == 0 {
             add(5, "no creator tax");
         } else if tax <= 200 {
-            add(10, &format!("creator tax {}%, creator earns on volume", tax as f64 / 100.0));
+            add(
+                10,
+                &format!(
+                    "creator tax {}%, creator earns on volume",
+                    tax as f64 / 100.0
+                ),
+            );
         } else if tax <= 500 {
             add(-5, &format!("creator tax {}%", tax as f64 / 100.0));
         } else {
-            add(-25, &format!("creator tax {}%, traders pay {}% per side", tax as f64 / 100.0, 1.0 + tax as f64 / 100.0));
+            add(
+                -25,
+                &format!(
+                    "creator tax {}%, traders pay {}% per side",
+                    tax as f64 / 100.0,
+                    1.0 + tax as f64 / 100.0
+                ),
+            );
         }
-        if let Some(tx) = &intel.tx {
-            if rec.creator_fee_recipient != tx.from {
-                add(5, "fees routed to a third party (builder / KOL deal pattern)");
-            }
+        if let Some(tx) = &intel.tx
+            && rec.creator_fee_recipient != tx.from
+        {
+            add(
+                5,
+                "fees routed to a third party (builder / KOL deal pattern)",
+            );
         }
         if ctx.fee_recipient_is_contract == Some(true) {
             add(-8, "fee recipient is a contract");
@@ -107,7 +130,13 @@ pub fn score_launch(intel: &LaunchIntel, ctx: &ScoreContext) -> Score {
             add(8, "has telegram");
         }
     }
-    if intel.meta.as_ref().map(|m| m.description.len()).unwrap_or(0) >= 40 {
+    if intel
+        .meta
+        .as_ref()
+        .map(|m| m.description.len())
+        .unwrap_or(0)
+        >= 40
+    {
         add(4, "real description");
     }
 
@@ -118,25 +147,46 @@ pub fn score_launch(intel: &LaunchIntel, ctx: &ScoreContext) -> Score {
         } else if n <= 3 {
             add(-5, &format!("{n} wallet(s) exempt from the opening tax"));
         } else {
-            add(-20, &format!("{n} wallets exempt from the opening tax, declared bundle"));
+            add(
+                -20,
+                &format!("{n} wallets exempt from the opening tax, declared bundle"),
+            );
         }
     }
 
     if ctx.farm_twins >= 2 {
-        add(-25, &format!("launch farm: {} launches with this exact fingerprint in 30 min", ctx.farm_twins + 1));
+        add(
+            -25,
+            &format!(
+                "launch farm: {} launches with this exact fingerprint in 30 min",
+                ctx.farm_twins + 1
+            ),
+        );
     } else if ctx.farm_twins == 1 {
-        add(-8, "one earlier launch with this exact fingerprint in 30 min");
+        add(
+            -8,
+            "one earlier launch with this exact fingerprint in 30 min",
+        );
     }
 
     if let Some((prior, graduated)) = ctx.deployer {
         if prior == 0 {
             add(5, "fresh deployer");
         } else if graduated as f64 / prior as f64 >= 0.3 {
-            add(15, &format!("deployer graduated {graduated}/{prior} recent launches"));
+            add(
+                15,
+                &format!("deployer graduated {graduated}/{prior} recent launches"),
+            );
         } else if prior >= 5 && graduated == 0 {
-            add(-25, &format!("serial deployer, {prior} launches, none graduated"));
+            add(
+                -25,
+                &format!("serial deployer, {prior} launches, none graduated"),
+            );
         } else {
-            add(-5, &format!("deployer {prior} recent launches, {graduated} graduated"));
+            add(
+                -5,
+                &format!("deployer {prior} recent launches, {graduated} graduated"),
+            );
         }
     }
 
@@ -155,7 +205,10 @@ pub fn score_launch(intel: &LaunchIntel, ctx: &ScoreContext) -> Score {
         let p = progress(curve);
         let age = ctx.age_sec.unwrap_or(999);
         if p >= 0.25 && age <= 120 {
-            add(10, &format!("{}% of the curve filled in {age}s", (p * 100.0).round()));
+            add(
+                10,
+                &format!("{}% of the curve filled in {age}s", (p * 100.0).round()),
+            );
         }
     }
 
@@ -167,5 +220,9 @@ pub fn score_launch(intel: &LaunchIntel, ctx: &ScoreContext) -> Score {
     } else {
         Verdict::Skip
     };
-    Score { total, verdict, reasons: r }
+    Score {
+        total,
+        verdict,
+        reasons: r,
+    }
 }

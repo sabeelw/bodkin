@@ -1,7 +1,8 @@
 use std::io::IsTerminal;
 
 fn color_on() -> bool {
-    std::env::var_os("NO_COLOR").is_none() && (std::io::stdout().is_terminal() || std::env::var_os("FORCE_COLOR").is_some())
+    std::env::var_os("NO_COLOR").is_none()
+        && (std::io::stdout().is_terminal() || std::env::var_os("FORCE_COLOR").is_some())
 }
 
 fn wrap(open: &str, s: impl std::fmt::Display) -> String {
@@ -49,7 +50,14 @@ const LINES: [&str; 6] = [
     "██████╔╝╚██████╔╝██████╔╝██║  ██╗██║██║ ╚████║",
     "╚═════╝  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝",
 ];
-const GRADIENT: [[u8; 3]; 6] = [[204, 255, 0], [214, 250, 0], [224, 246, 0], [235, 241, 0], [245, 236, 0], [255, 231, 0]];
+const GRADIENT: [[u8; 3]; 6] = [
+    [204, 255, 0],
+    [214, 250, 0],
+    [224, 246, 0],
+    [235, 241, 0],
+    [245, 236, 0],
+    [255, 231, 0],
+];
 
 pub fn banner(tagline: &str) {
     if !color_on() {

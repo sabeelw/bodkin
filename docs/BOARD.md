@@ -14,12 +14,11 @@ the feed; positions keep being marked and closed by their exit rules either way.
 **Header.** The mode pill shows `feed only`, `demo trading`, `LIVE · not armed` or `LIVE · armed`. The subtitle shows how many launches
 the chain produced in the last five minutes. The clock is UTC, the same clock the feed uses.
 
-**The pulse.** The engine sends a tick every ten seconds with the feed's state and the RPC gate's state. A yellow bar under the header says
-when the chain has been quiet for two minutes or an RPC endpoint is benched; a red bar says the engine itself has not answered for 35 s,
+**The pulse.** The engine sends a tick every ten seconds with feed, chain-clock and RPC-gate state, including RPC latency percentiles. A yellow bar says when the chain has been quiet or an endpoint is benched; a red bar reports an unseeded/stale/high-jitter chain clock or an engine that has not answered for 35 s,
 which means its console window is gone or stuck: close it and start bodkin again. Every button waits at most eight seconds for the engine and
 says so if it hears nothing, instead of dying silently.
 
-**Five numbers.** Launches seen this session · fired · open positions · realized PnL in ETH for the session · uptime. A tile flashes yellow
+**Five numbers.** Launches seen this session · fired · open positions · realized PnL after recorded entry and exit gas in ETH across the authoritative position snapshot · uptime. Unknown legacy realized basis displays `n/a` rather than zero. A tile flashes yellow
 when its number changes.
 
 **Launches.** Newest first. Each row: time, name and symbol with a copy-contract button, pair asset, dev buy as a share of supply, creator tax,
@@ -31,8 +30,7 @@ keys a Robinhood Chain market) and FOMO (its page needs a signed-in FOMO session
 every rule that refused it; score and verdict; dev buy; creator tax; who receives the fees; exempt wallets; the deployer's record; the
 opening tax at read time; curve progress; read latency and block; and every scoring line with its points. `esc` closes it.
 
-**Positions.** Open positions with a live mark every five seconds: PnL, size, venue (curve or pool), peak, and a **close now** button.
-Closed positions stay for fifteen minutes with their exit reason. In `--live` mode the button asks for confirmation first.
+**Positions.** Open positions are marked every second for their first minute and every 30 seconds later: remaining-basis PnL, size, venue, and peak. Partial exits reduce inventory, entry basis and allocated entry-gas basis but remain open. **close now** queues one serialized close, returns the same pending result on retries, and waits for a canonical receipt-backed exit or explicit error; in `--live` mode it asks for confirmation first. Closed positions stay visible for fifteen minutes.
 
 **Rules.** The rules the engine is running. Five of them have steppers and can be edited while it runs: min score, max open, tax ceiling,
 dev share, exempt wallets. An edit applies to the next launch and shows as a toast. The buy size and the exits are launch flags, so they are
@@ -59,14 +57,13 @@ All on `127.0.0.1` only.
 | Method | Path | Effect |
 |---|---|---|
 | GET | `/` | the page |
-| GET | `/events` | server-sent events: `hello`, `tick` (every 10 s), `launch`, `fire`, `mark`, `exit`, `paused`, `rules`, `index` |
+| GET | `/events` | server-sent events including `hello`, lag-triggered `resync`, `tick`, `launch`, `hold`, `entry`, `fire`, `mark`, `exit`, error states, `paused`, `rules`, and `index` |
 | GET | `/api/state` | a snapshot: mode, paused, rules, counters, positions, ETH/USD, feed and RPC health, the last 100 events |
 | POST | `/api/start`, `/api/stop` | firing on / off (`/api/resume` and `/api/pause` are the same verbs) |
-| POST | `/api/close/<positionId>` | sell a position now |
+| POST | `/api/close/<positionId>` | idempotently queue a serialized close and return `202 Accepted`; retries report `alreadyPending`, and SSE reports confirmation/failure |
 | POST | `/api/rules` | body `{"minScore": 70}` etc.; only the five editable rules, clamped to their bounds |
 
-There is no route that buys on demand. Buying is the engine's decision under the rules on screen, and `--live` is a launch flag, not a
-button, so a page left open cannot be turned into a trading surface by anything on it.
+Every request requires an exact local Host; browser origins must match its loopback host and configured port, foreign `Sec-Fetch-Site` is rejected, and POST bodies must be JSON. Security headers deny framing and caching. There is no route that buys on demand. Buying is the engine's decision under the rules on screen, and `--live` is a launch flag, not a button, so a page left open cannot be turned into a trading surface by anything on it.
 
 ## Two things hidden in the page
 

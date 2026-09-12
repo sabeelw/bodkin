@@ -1,0 +1,10 @@
+* text=auto
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+README.md -text whitespace=-trailing-space
+*.html text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sol text eol=lf
+*.cmd text eol=crlf

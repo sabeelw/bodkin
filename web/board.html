@@ -3,8 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#000000">
 <title>bodkin</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -18,11 +20,13 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--text2); font: 400 14px/1.45 var(--sans); }
   button, input { font: inherit; color: inherit; }
+  button { touch-action: manipulation; -webkit-tap-highlight-color: rgba(255,231,0,.2); }
   a { color: inherit; }
 
   /* header */
   header { display: flex; align-items: center; gap: 14px; padding: 16px 28px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: rgba(0,0,0,.92); backdrop-filter: blur(8px); z-index: 5; }
-  .mark { width: 34px; height: 34px; cursor: pointer; transition: transform .25s var(--ease); user-select: none; }
+  .mark { width: 34px; height: 34px; padding: 0; border: 0; background: transparent; cursor: pointer; transition: transform .25s var(--ease); user-select: none; }
+  .mark svg { display: block; width: 100%; height: 100%; }
   .mark:hover { transform: rotate(-8deg) scale(1.06); }
   .mark:active { transform: rotate(-8deg) scale(.94); }
   header h1 { font: 400 30px/1 var(--serif); letter-spacing: -1px; color: var(--text); margin: 0; }
@@ -62,7 +66,7 @@
   .panel h2 { font: 400 20px/1.2 var(--serif); letter-spacing: -.4px; color: var(--text); margin: 0; padding: 14px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
   .panel h2 .tools { margin-left: auto; display: flex; gap: 6px; align-items: center; }
   .search { height: 28px; width: 190px; border-radius: 28px; border: 1px solid var(--line-2); background: transparent; padding: 0 12px; font-size: 12.5px; outline: none; transition: border-color .18s, box-shadow .18s; }
-  .search:focus { border-color: var(--yellow); box-shadow: 0 0 0 3px rgba(255,231,0,.15); }
+  .search:focus-visible { border-color: var(--yellow); box-shadow: 0 0 0 3px rgba(255,231,0,.15); }
   .search::placeholder { color: var(--muted); }
 
   /* feed */
@@ -70,7 +74,7 @@
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px; }
   th { text-align: left; font: 500 11px/1 var(--sans); letter-spacing: .3px; color: var(--muted); padding: 9px 12px; border-bottom: 1px solid var(--line); text-transform: lowercase; }
   td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
-  tbody tr { cursor: pointer; transition: background .15s; animation: rowIn .35s var(--ease); }
+  tbody tr { transition: background .15s; animation: rowIn .35s var(--ease); }
   tbody tr:hover { background: rgba(255,255,255,.035); }
   tbody tr.fire { background: rgba(204,255,0,.07); }
   tbody tr.fire.fresh { animation: rowIn .35s var(--ease), flash 1.4s var(--ease); }
@@ -91,7 +95,7 @@
   .score i { display: inline-block; width: 44px; height: 4px; border-radius: 4px; background: var(--chip); overflow: hidden; }
   .score i b { display: block; height: 100%; width: 100%; background: var(--muted); transform-origin: left; transform: scaleX(0); transition: transform .6s var(--ease); }
   .score.hi i b { background: var(--neon); } .score.mid i b { background: var(--text2); }
-  .copy { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 0 4px; border-radius: 6px; transition: color .15s, transform .12s; font-family: var(--mono); font-size: 11px; }
+  .copy { min-width: 24px; min-height: 24px; border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 0 4px; border-radius: 6px; transition: color .15s, transform .12s; font-family: var(--mono); font-size: 11px; }
   .copy:hover { color: var(--yellow); } .copy:active { transform: scale(.9); }
   .empty { padding: 26px 18px; color: var(--muted); }
 
@@ -108,13 +112,13 @@
   .rules { padding: 10px 18px 14px; font-family: var(--mono); font-size: 12px; color: var(--muted); display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; }
   .rules b { color: var(--text2); font-weight: 400; text-align: right; }
   .step { display: inline-flex; align-items: center; border: 1px solid var(--line-2); border-radius: 20px; overflow: hidden; }
-  .step button { border: 0; background: transparent; width: 24px; height: 22px; cursor: pointer; color: var(--muted); transition: background .15s, color .15s; line-height: 1; }
+  .step button { border: 0; background: transparent; width: 24px; height: 24px; cursor: pointer; color: var(--muted); transition: background .15s, color .15s; line-height: 1; }
   .step button:hover { background: var(--yellow); color: var(--on-neon); }
   .step input { width: 46px; border: 0; background: transparent; text-align: center; font-family: var(--mono); font-size: 12px; outline: none; color: var(--text); padding: 0; }
   .rules .note { grid-column: 1 / -1; font-family: var(--sans); font-size: 11.5px; padding-top: 6px; }
 
   /* drawer */
-  .drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(460px, 100%); background: var(--panel); border-left: 1px solid var(--line); z-index: 10; transform: translateX(102%); transition: transform .32s var(--ease); overflow-y: auto; padding: 18px 22px 40px; }
+  .drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(460px, 100%); background: var(--panel); border-left: 1px solid var(--line); z-index: 10; transform: translateX(102%); transition: transform .32s var(--ease); overflow-y: auto; padding: max(18px, env(safe-area-inset-top)) max(22px, env(safe-area-inset-right)) max(40px, env(safe-area-inset-bottom)) 22px; }
   .drawer.open { transform: none; box-shadow: -30px 0 60px -30px rgba(0,0,0,.8); }
   .drawer h3 { font: 400 26px/1.1 var(--serif); letter-spacing: -.6px; color: var(--text); margin: 0 0 2px; }
   .drawer .ca { font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; display: flex; gap: 6px; align-items: center; }
@@ -153,39 +157,61 @@
   .notice.bad { border-color: var(--loss); color: var(--loss); }
   .btn.arm { border-color: var(--loss); color: var(--loss); }
   .btn.arm:hover { background: var(--loss); color: #fff; border-color: var(--loss); }
+  [hidden] { display: none !important; }
+  html { color-scheme: dark; }
+  :focus-visible { outline: 2px solid var(--yellow); outline-offset: 3px; scroll-margin: 80px 0 48px; }
+  button, input { touch-action: manipulation; }
+  .step button, .step input, .copy { min-height: 24px; }
+  .step:focus-within { outline: 2px solid var(--yellow); outline-offset: 2px; }
+  .drawer { overscroll-behavior: contain; }
+  .drawer h3, .drawer .desc, td .name, .pos .sym { overflow-wrap: anywhere; }
+  .btn.danger:hover, .btn.arm:hover { color: var(--on-neon); }
+  .skip { position: fixed; top: 8px; left: 8px; z-index: 30; background: var(--yellow); color: var(--on-neon); padding: 8px; transform: translateY(-150%); }
+  .skip:focus { transform: none; }
+  @media (max-width: 700px) {
+    header { flex-wrap: wrap; padding: 12px 16px; }
+    header .right { flex-wrap: wrap; margin-left: 0; width: 100%; }
+    main { padding: 16px; }
+    .panel h2 { flex-wrap: wrap; }
+    .panel h2 .tools { flex-wrap: wrap; margin-left: 0; }
+    .search { width: 100%; font-size: 16px; }
+    footer { flex-wrap: wrap; padding: 16px; }
+    .notice { margin-inline: 16px; }
+  }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
+<a class="skip" href="#main-content">skip to launches</a>
 <header>
-  <svg class="mark" id="mark" viewBox="0 0 256 256" aria-label="bodkin"><rect x="0.5" y="0.5" width="255" height="255" rx="48" fill="#000" stroke="#35322D"/><polygon points="128,30 158,138 128,120 98,138" fill="#CCFF00"/><rect x="118" y="132" width="20" height="18" fill="#CCFF00"/><rect x="123" y="150" width="10" height="66" fill="#CCFF00"/><polygon points="123,216 123,232 105,224" fill="#CCFF00"/><polygon points="133,216 133,232 151,224" fill="#CCFF00"/></svg>
+  <button class="mark" id="mark" type="button" aria-label="Bodkin animation"><svg viewBox="0 0 256 256" aria-hidden="true"><rect x="0.5" y="0.5" width="255" height="255" rx="48" fill="#000" stroke="#35322D"/><polygon points="128,30 158,138 128,120 98,138" fill="#CCFF00"/><rect x="118" y="132" width="20" height="18" fill="#CCFF00"/><rect x="123" y="150" width="10" height="66" fill="#CCFF00"/><polygon points="123,216 123,232 105,224" fill="#CCFF00"/><polygon points="133,216 133,232 151,224" fill="#CCFF00"/></svg></button>
   <div><h1>bodkin</h1><div class="sub">pons v2 · chain 4663 · <span id="tempo">…</span></div></div>
   <div class="right">
-    <span id="mode" class="pill"><span class="dot"></span><span id="mode-text">connecting</span></span>
-    <button class="btn" id="run" title="p">start demo</button>
-    <button class="btn ghost" id="sound" title="beep on fire">sound off</button>
-    <span class="clock" id="clock"></span>
+    <span id="mode" class="pill" role="status" aria-live="polite"><span class="dot"></span><span id="mode-text">connecting</span></span>
+    <button class="btn" id="run" title="p" aria-pressed="false">start demo</button>
+    <button class="btn ghost" id="sound" title="beep on fire" aria-pressed="false">sound off</button>
+    <time class="clock" id="clock"></time>
   </div>
 </header>
-<div class="notice" id="notice" hidden></div>
-<main>
+<div class="notice" id="notice" role="status" aria-live="polite" hidden></div>
+<main id="main-content" tabindex="-1">
   <section class="stats">
     <div class="stat" id="st-seen"><div class="v" id="s-seen">0</div><div class="k">launches</div></div>
     <div class="stat" id="st-fire"><div class="v neon" id="s-fire">0</div><div class="k">fired</div></div>
     <div class="stat" id="st-open"><div class="v" id="s-open">0</div><div class="k">open</div></div>
-    <div class="stat" id="st-pnl"><div class="v" id="s-pnl">0.0000</div><div class="k">realized, ETH</div></div>
+    <div class="stat" id="st-pnl"><div class="v" id="s-pnl">0.0000</div><div class="k">realized after gas, ETH</div></div>
     <div class="stat"><div class="v" id="s-up">0m</div><div class="k">uptime</div></div>
   </section>
   <section class="panel">
     <h2>launches
       <div class="tools">
-        <button class="btn sm on" data-filter="all">all</button>
-        <button class="btn sm" data-filter="fire">fire</button>
-        <button class="btn sm" data-filter="eth">eth pairs</button>
-        <input class="search" id="search" placeholder="search  /" autocomplete="off">
+        <button class="btn sm on" data-filter="all" aria-pressed="true">all</button>
+        <button class="btn sm" data-filter="fire" aria-pressed="false">fire</button>
+        <button class="btn sm" data-filter="eth" aria-pressed="false">eth pairs</button>
+        <input class="search" id="search" name="launch-search" type="search" placeholder="Search…  /" autocomplete="off" spellcheck="false" aria-label="Search launches">
       </div>
     </h2>
-    <div class="feed-wrap"><table><thead><tr><th>time</th><th>token</th><th>pair</th><th>dev</th><th>tax</th><th>score</th><th></th><th>why</th></tr></thead><tbody id="feed"></tbody></table><div class="empty" id="feed-empty">waiting for the first launch…</div></div>
+    <div class="feed-wrap"><table><thead><tr><th>time</th><th>token</th><th>pair</th><th>dev</th><th>tax</th><th>score</th><th>decision</th><th>reason</th></tr></thead><tbody id="feed"></tbody></table><div class="empty" id="feed-empty">waiting for the first launch…</div></div>
   </section>
   <aside>
     <section class="panel">
@@ -198,11 +224,11 @@
     </section>
   </aside>
 </main>
-<aside class="drawer" id="drawer">
-  <button class="btn sm ghost close" id="drawer-close">esc</button>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="false" aria-label="launch detail" inert>
+  <button class="btn sm ghost close" id="drawer-close" aria-label="close detail panel">esc</button>
   <div id="drawer-body"></div>
 </aside>
-<div class="toast" id="toast">copied</div>
+<div class="toast" id="toast" role="status" aria-live="polite">copied</div>
 <footer>
   <span>127.0.0.1 · <span id="foot-mode">dry run</span> · one engine, rules on screen</span>
   <a class="feather" href="https://robinhood.com/us/en/crypto/chain/" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 3c-6 0-11 3-14 8-1.6 2.7-2 5.8-2 10 3-4 6-6 9-8-2 3-3 6-3 8 5-1 8-4 9.5-8C20.5 9.5 20.5 6 20 3z" fill="#CCFF00"/><path d="M4 21c3-6 7-10 12-14" stroke="#110E08" stroke-width="1.2" fill="none"/></svg>built on Robinhood Chain</a>
@@ -217,11 +243,16 @@
 <script>
   const $ = (id) => document.getElementById(id);
   const feed = $("feed"), positions = $("positions"), drawer = $("drawer");
-  const state = { seen: 0, fired: 0, startedAt: Date.now(), pnl: 0n, live: false, paused: true, pos: new Map(), rows: new Map(), filter: "all", q: "", sound: false, sel: null, rules: null, tempo: [], refs: {}, health: null, lastTick: Date.now(), connected: false };
+  const state = { seen: 0, fired: 0, startedAt: Date.now(), live: false, paused: true, pos: new Map(), posSig: "", rows: new Map(), filter: "all", q: "", sound: false, sel: null, rules: null, tempo: [], refs: {}, health: null, lastTick: Date.now(), connected: false };
+  const timeFormatter = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "UTC" });
   const fmtEth = (wei) => (Number(BigInt(wei)) / 1e18).toFixed(4);
-  const hhmm = (t) => new Date(t).toISOString().slice(11, 19);
+  const fmtPnl = (value) => typeof value === "number" && Number.isFinite(value) ? `${value >= 0 ? "+" : ""}${value.toFixed(1)}%` : "n/a";
+  const pnlClass = (value) => typeof value !== "number" ? "" : value > 0 ? "up" : value < 0 ? "down" : "";
+  const hhmm = (t) => timeFormatter.format(new Date(t));
   const short = (a) => a ? a.slice(0, 6) + "…" + a.slice(-4) : "?";
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+  /* only http(s) ever becomes an href — anything else renders as inert text */
+  const safeUrl = (u) => { const s = String(u ?? "").trim(); return /^https?:\/\//i.test(s) ? s : ""; };
   /* every button goes through here: an 8 s timeout and a toast instead of a silent click */
   async function post(path, body) {
     const ctrl = new AbortController();
@@ -232,7 +263,7 @@
       if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
       return data;
     } catch (e) {
-      toast(e.name === "AbortError" ? "the engine did not answer in 8 s, restart bodkin" : "failed: " + e.message);
+      toast(e.name === "AbortError" ? "request timed out; it may still complete. Check status before retrying" : "failed: " + e.message);
       throw e;
     } finally { clearTimeout(t); }
   }
@@ -250,16 +281,18 @@
     t.textContent = !state.connected ? "connecting" : state.live ? (state.paused ? "LIVE · not armed" : "LIVE · armed") : (state.paused ? "feed only" : "demo trading");
     run.textContent = state.live ? (state.paused ? "arm live sniping" : "disarm") : (state.paused ? "start demo" : "stop demo");
     run.className = "btn" + (state.live && state.paused ? " arm" : "") + (!state.paused ? " on" : "");
+    run.setAttribute("aria-pressed", !state.paused ? "true" : "false");
+    $("sound").setAttribute("aria-pressed", state.sound ? "true" : "false");
     $("foot-mode").textContent = state.live ? "LIVE" : "dry run";
     $("pos-mode").textContent = state.live ? "live" : "dry";
     $("sound").textContent = state.sound ? "sound on" : "sound off";
     $("sound").classList.toggle("on", state.sound);
   }
   $("run").onclick = async () => {
-    if (state.live && state.paused && !confirm("Arm LIVE sniping? Real ETH leaves your wallet under the rules on screen, up to the session budget. Type ok to continue.")) return;
+    if (state.live && state.paused && !confirm("Arm LIVE sniping? Real ETH leaves your wallet under the rules on screen, up to the session budget.")) return;
     const b = $("run"); b.disabled = true;
     try { const r = await post(state.paused ? "/api/start" : "/api/stop"); state.paused = r.paused; renderMode(); toast(state.paused ? "stopped: launches keep coming, nothing fires" : state.live ? "armed" : "demo started: dry-run buys are on"); }
-    finally { b.disabled = false; }
+    catch {} finally { b.disabled = false; }
   };
   $("sound").onclick = () => { state.sound = !state.sound; renderMode(); if (state.sound) beep(); };
 
@@ -269,6 +302,7 @@
     const sinceTick = Date.now() - state.lastTick;
     if (state.connected && sinceTick > 35000) { n.hidden = false; n.className = "notice bad"; n.textContent = `the engine has not answered for ${Math.round(sinceTick / 1000)} s. Close its console window and start it again.`; return; }
     const h = state.health;
+    if (h && h.clock && (!h.clock.seeded || h.clock.ageMs > 2000 || h.clock.jitterMs > 1500)) { n.hidden = false; n.className = "notice bad"; n.textContent = `chain clock unhealthy · age ${h.clock.ageMs} ms · jitter ${h.clock.jitterMs} ms`; return; }
     if (h && h.lastLaunchAgeSec != null && h.lastLaunchAgeSec > 120) { n.hidden = false; n.className = "notice"; n.textContent = `no launch for ${h.lastLaunchAgeSec} s · feed ${h.feed.mode}${h.feed.note ? " · " + h.feed.note : ""}${h.gate.coolingDown ? " · rpc cooling down after a 429" : ""}`; return; }
     if (h && h.gate.endpoints.some((e) => e.benched)) { n.hidden = false; n.className = "notice"; n.textContent = `rpc ${h.gate.endpoints.filter((e) => e.benched).map((e) => e.label).join(", ")} benched, using the other endpoint`; return; }
     n.hidden = true;
@@ -279,8 +313,10 @@
     $("s-seen").textContent = state.seen;
     $("s-fire").textContent = state.fired;
     $("s-open").textContent = [...state.pos.values()].filter((p) => p.status === "open").length;
-    const pnl = Number(state.pnl) / 1e18;
-    const pv = $("s-pnl"); pv.textContent = (pnl >= 0 ? "+" : "") + pnl.toFixed(4); pv.className = "v" + (pnl > 0 ? " neon" : pnl < 0 ? " loss" : "");
+    const pnl = totalRealized();
+    const pv = $("s-pnl");
+    if (pnl == null) { pv.textContent = "n/a"; pv.className = "v"; }
+    else { const e = Number(pnl) / 1e18; pv.textContent = (e >= 0 ? "+" : "") + e.toFixed(4); pv.className = "v" + (e > 0 ? " neon" : e < 0 ? " loss" : ""); }
     $("s-up").textContent = Math.floor((Date.now() - state.startedAt) / 60000) + "m";
     const recent = state.tempo.filter((t) => t > Date.now() - 300000).length;
     $("tempo").textContent = recent ? `${recent} launches / 5 min` : "reading the chain";
@@ -289,6 +325,14 @@
 
   /* feed */
   function scoreClass(s) { return s >= 75 ? "hi" : s >= 45 ? "mid" : "lo"; }
+  function totalRealized() {
+    let total = 0n;
+    for (const p of state.pos.values()) {
+      if (p.realizedWei == null) return null;
+      try { total += BigInt(p.realizedWei); } catch { return null; }
+    }
+    return total;
+  }
   function whyHtml(e) {
     if (e.fire) return `<span class="why"><b>fires</b> after the opening tax</span>`;
     const w = e.why || [];
@@ -301,7 +345,7 @@
     tr.className = (e.fire ? "fire" : "") + (fresh && e.fire ? " fresh" : "");
     const s = e.score ?? 0;
     tr.innerHTML = `<td>${hhmm(e.t)}</td>
-      <td><span class="name">${esc((e.name || "?").slice(0, 26))}</span> <span class="sym">$${esc((e.symbol || "?").replace(/^\$/, ""))}</span> <button class="copy" data-copy="${e.token}" title="copy contract">⧉</button></td>
+      <td><button class="copy name" data-detail="${esc(e.token)}" aria-label="View ${esc(e.name || 'token')} details">${esc((e.name || "?").slice(0, 26))}</button> <span class="sym">$${esc((e.symbol || "?").replace(/^\$/, ""))}</span> <button class="copy" data-copy="${esc(e.token)}" title="copy contract" aria-label="copy contract address">⧉</button></td>
       <td>${esc(e.pair || "ETH")}</td><td>${(e.devPct ?? 0).toFixed(2)}%</td><td>${((e.taxBps ?? 0) / 100).toFixed(1)}%</td>
       <td><span class="score ${scoreClass(s)}">${s}<i><b style="transform:scaleX(${(s / 100).toFixed(2)})"></b></i></span></td>
       <td>${e.fire ? '<span class="tag fire">FIRE</span>' : '<span class="tag pass">pass</span>'}</td>
@@ -320,11 +364,11 @@
     tr.classList.toggle("hidden", !show);
   }
   function refilter() { for (const { e, tr } of state.rows.values()) applyFilter(tr, e); }
-  document.querySelectorAll("[data-filter]").forEach((b) => { b.onclick = () => { state.filter = b.dataset.filter; document.querySelectorAll("[data-filter]").forEach((x) => x.classList.toggle("on", x === b)); refilter(); }; });
+  document.querySelectorAll("[data-filter]").forEach((b) => { b.onclick = () => { state.filter = b.dataset.filter; document.querySelectorAll("[data-filter]").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", x === b ? "true" : "false"); }); refilter(); }; });
   $("search").oninput = (ev) => { state.q = ev.target.value.trim().toLowerCase(); refilter(); };
   feed.addEventListener("click", (ev) => {
     const c = ev.target.closest("[data-copy]"); if (c) { ev.stopPropagation(); copy(c.dataset.copy); return; }
-    const tr = ev.target.closest("tr"); if (tr) openDrawer(tr.dataset.token);
+    const detail = ev.target.closest("[data-detail]"); if (detail) openDrawer(detail.dataset.detail);
   });
 
   /* drawer */
@@ -335,17 +379,18 @@
     const reasons = (d.reasons || []).map((r) => { const m = r.match(/^([+-]\d+)\s(.*)$/); const n = m ? Number(m[1]) : 0; return `<li><span class="${n > 0 ? "plus" : n < 0 ? "minus" : ""}">${m ? m[1] : ""}</span>${esc(m ? m[2] : r)}</li>`; }).join("");
     const exempt = (d.exempt || []).length ? (d.exempt || []).map((a) => `<div>${short(a)}</div>`).join("") : "none";
     const prog = d.progress == null ? null : Math.min(100, d.progress * 100);
+    const social = (label, u) => { const s = safeUrl(u); return s ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(s)}">${label}</a>` : ""; };
     $("drawer-body").innerHTML = `
       <h3>${esc(e.name || "?")} <span style="color:var(--muted)">$${esc((e.symbol || "").replace(/^\$/, ""))}</span></h3>
-      <div class="ca">${e.token} <button class="copy" data-copy="${e.token}">⧉</button></div>
+      <div class="ca">${esc(e.token)} <button class="copy" data-copy="${esc(e.token)}" aria-label="copy contract address">⧉</button></div>
       <div class="links">
-        <a class="btn sm" target="_blank" rel="noopener" href="https://www.ponsfamily.com/token/${e.token}">pons</a>
-        <a class="btn sm" target="_blank" rel="noopener" href="https://robinhoodchain.blockscout.com/token/${e.token}">explorer</a>
+        <a class="btn sm" target="_blank" rel="noopener" href="https://www.ponsfamily.com/token/${esc(String(e.token).toLowerCase())}">pons</a>
+        <a class="btn sm" target="_blank" rel="noopener" href="https://robinhoodchain.blockscout.com/token/${esc(String(e.token).toLowerCase())}">explorer</a>
         ${e.curve ? `<a class="btn sm" target="_blank" rel="noopener" href="https://axiom.trade/meme/${esc(String(e.curve).toLowerCase())}?chain=robinhood" title="this launch on Axiom">axiom</a>` : ""}
         <a class="btn sm" target="_blank" rel="noopener" href="https://fomo.family/tokens/robinhood/${esc(String(e.token).toLowerCase())}" title="this launch on FOMO, needs a FOMO session">fomo</a>
-        ${d.socials?.x ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(d.socials.x)}">x</a>` : ""}
-        ${d.socials?.web ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(d.socials.web)}">web</a>` : ""}
-        ${d.socials?.tg ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(d.socials.tg)}">tg</a>` : ""}
+        ${social("x", d.socials?.x)}
+        ${social("web", d.socials?.web)}
+        ${social("tg", d.socials?.tg)}
       </div>
       ${d.description ? `<p class="desc">${esc(d.description)}</p>` : ""}
       <div class="why">${e.fire ? "<b>FIRE</b> · passed every rule, waits for the opening tax, then buys" : `<b>pass</b> · ${esc((e.why || []).join(" · "))}`}</div>
@@ -363,31 +408,49 @@
         ${d.errors?.length ? `<dt>errors</dt><dd class="loss">${esc(d.errors.join("; "))}</dd>` : ""}
       </dl>
       <ul class="reasons">${reasons}</ul>`;
+    drawer.inert = false;
     drawer.classList.add("open");
+    $("drawer-close").focus();
   }
-  function renderRefs() { const r = state.refs || {}; const a = []; if (r.axiom) a.push(`<a href="${esc(r.axiom)}" target="_blank" rel="noopener">axiom</a>`); if (r.fomo) a.push(`<a href="${esc(r.fomo)}" target="_blank" rel="noopener">fomo</a>`); $("foot-refs").innerHTML = a.length ? ` · sign up: ${a.join(" · ")}` : ""; }
-  function closeDrawer() { drawer.classList.remove("open"); document.querySelectorAll("tr.sel").forEach((x) => x.classList.remove("sel")); state.sel = null; }
+  function renderRefs() { const r = state.refs || {}; const a = []; const ax = safeUrl(r.axiom), fo = safeUrl(r.fomo); if (ax) a.push(`<a href="${esc(ax)}" target="_blank" rel="noopener">axiom</a>`); if (fo) a.push(`<a href="${esc(fo)}" target="_blank" rel="noopener">fomo</a>`); $("foot-refs").innerHTML = a.length ? ` · sign up: ${a.join(" · ")}` : ""; }
+  function closeDrawer() {
+    const back = state.sel && state.rows.get(state.sel);
+    drawer.classList.remove("open"); drawer.inert = true;
+    document.querySelectorAll("tr.sel").forEach((x) => x.classList.remove("sel"));
+    back?.tr.querySelector("[data-detail]")?.focus();
+    state.sel = null;
+  }
   $("drawer-close").onclick = closeDrawer;
   drawer.addEventListener("click", (ev) => {
     const c = ev.target.closest("[data-copy]"); if (c) { copy(c.dataset.copy); return; }
   });
 
-  /* positions */
+  /* positions — re-rendered at most once per data change, not per tick */
   function renderPositions() {
     const list = [...state.pos.entries()].filter(([, p]) => p.status === "open" || p.closedAt > Date.now() - 900000).sort((a, b) => (a[1].status === "open" ? 0 : 1) - (b[1].status === "open" ? 0 : 1));
+    const sig = list.map(([id, p]) => `${id}:${p.status}:${p.pnl}:${p.peak ?? ""}:${p.reason ?? ""}:${p.closing ? 1 : 0}:${p.held ?? ""}:${p.basisWei ?? ""}:${p.symbol}:${p.ethIn}:${p.venue}`).join("|") || "empty";
+    if (sig === state.posSig) return;
+    state.posSig = sig;
     if (!list.length) { positions.innerHTML = '<div class="empty">nothing open</div>'; return; }
     positions.innerHTML = list.map(([id, p]) => `<div class="pos" data-id="${esc(id)}">
       <span class="sym">$${esc(p.symbol)} <span class="tag ${p.status === "open" ? "open" : "pass"}">${p.status}</span></span>
-      <span class="pnl ${p.pnl > 0 ? "up" : p.pnl < 0 ? "down" : ""}">${p.pnl >= 0 ? "+" : ""}${p.pnl.toFixed(1)}%</span>
-      <span class="meta">${fmtEth(p.ethIn)} ETH · ${esc(p.venue || "curve")}${p.peak != null && p.peak > 0 ? ` · peak +${p.peak.toFixed(1)}%` : ""}${p.reason ? ` · ${esc(p.reason)}` : ""}${p.status === "open" ? `<button class="btn sm danger" data-close="${esc(id)}">close now</button>` : ""}</span>
+      <span class="pnl ${pnlClass(p.pnl)}">${fmtPnl(p.pnl)}</span>
+      <span class="meta">${fmtEth(p.ethIn)} ETH · ${esc(p.venue || "curve")}${p.peak != null && p.peak > 0 ? ` · peak +${p.peak.toFixed(1)}%` : ""}${p.reason ? ` · ${esc(p.reason)}` : ""}${p.status === "open" ? `<button class="btn sm danger" data-close="${esc(id)}"${p.closing ? " disabled" : ""}>${p.closing ? "pending" : "close now"}</button>` : ""}</span>
     </div>`).join("");
   }
   positions.addEventListener("click", async (ev) => {
     const b = ev.target.closest("[data-close]"); if (!b) return;
     if (state.live && !confirm("Sell this position now at the current quote?")) return;
-    b.disabled = true; b.textContent = "closing…";
-    try { const r = await post("/api/close/" + encodeURIComponent(b.dataset.close)); toast(`closed ${r.pnlPct >= 0 ? "+" : ""}${Number(r.pnlPct).toFixed(1)}% on the ${r.venue}`); }
-    catch (e) { toast("close failed"); b.disabled = false; b.textContent = "close now"; }
+    const p = state.pos.get(b.dataset.close);
+    if (p) { p.closing = true; renderPositions(); }
+    try {
+      // 202: the sell is queued on the engine; the exit event reports the outcome.
+      await post("/api/close/" + encodeURIComponent(b.dataset.close));
+      toast(state.live ? "close queued; waiting for confirmation" : "dry close queued");
+    }
+    catch (e) {
+      if (e.name !== "AbortError" && p) { p.closing = false; renderPositions(); }
+    }
   });
 
   /* rules */
@@ -412,7 +475,7 @@
       ["max hold", r.exits.maxHoldMin + " min", null],
     ];
     $("rules").innerHTML = rows.map(([k, v, key, unit]) => key && ed.has(key)
-      ? `<span>${k}${unit ? ` <span style="opacity:.6">${unit}</span>` : ""}</span><b><span class="step"><button data-step="${key}" data-d="-1">−</button><input data-rule="${key}" value="${v}" inputmode="numeric"><button data-step="${key}" data-d="1">+</button></span></b>`
+      ? `<span>${k}${unit ? ` <span style="opacity:.6">${unit}</span>` : ""}</span><b><span class="step"><button data-step="${esc(key)}" data-d="-1" aria-label="decrease ${esc(k)}">−</button><input data-rule="${esc(key)}" name="${esc(key)}" type="number" value="${esc(v)}" inputmode="numeric" autocomplete="off" aria-label="${esc(k)}"><button data-step="${esc(key)}" data-d="1" aria-label="increase ${esc(k)}">+</button></span></b>`
       : `<span>${k}</span><b>${esc(v)}</b>`).join("") + `<div class="note">editable rules apply to the next launch · exits and the buy size are launch flags</div>`;
   }
   const stepSize = { minScore: 5, maxOpenPositions: 1, maxOpeningTaxBps: 50, maxDevSharePct: 1, maxExemptWallets: 1 };
@@ -420,21 +483,56 @@
     const r = await post("/api/rules", { [key]: value });
     if (r.rules) { state.rules = r.rules; renderRules(); toast(`${key} → ${r.changed[key]}`); }
   }
-  $("rules").addEventListener("click", (ev) => { const b = ev.target.closest("[data-step]"); if (!b) return; const key = b.dataset.step; const cur = Number(state.rules[key]); setRule(key, cur + Number(b.dataset.d) * stepSize[key]); });
-  $("rules").addEventListener("change", (ev) => { const i = ev.target.closest("[data-rule]"); if (i) setRule(i.dataset.rule, Number(i.value)); });
+  $("rules").addEventListener("click", (ev) => { const b = ev.target.closest("[data-step]"); if (!b) return; const key = b.dataset.step; const cur = Number(state.rules[key]); setRule(key, cur + Number(b.dataset.d) * stepSize[key]).catch(() => {}); });
+  $("rules").addEventListener("change", (ev) => { const i = ev.target.closest("[data-rule]"); if (i) setRule(i.dataset.rule, Number(i.value)).catch(() => {}); });
 
   /* events */
   function onEvent(e) {
-    if (e.kind === "hello") {
+    if (e.kind === "hello" || e.kind === "resync") {
       state.live = e.live; state.paused = !!e.paused; state.startedAt = e.startedAt; state.seen = e.seen || 0; state.fired = e.fired || 0; state.rules = e.rules;
       state.refs = e.refs || {}; state.health = e.health || null; state.lastTick = Date.now(); state.connected = true; renderRefs();
-      for (const p of e.positions || []) state.pos.set(p.id, { symbol: p.symbol, ethIn: p.ethIn, pnl: p.pnl, status: p.status, venue: "curve", reason: p.reason, closedAt: p.closedAt });
+      state.pos.clear(); state.posSig = "";
+      for (const p of e.positions || []) {
+        state.pos.set(p.id, { symbol: p.symbol, ethIn: p.ethIn, pnl: p.pnl, status: p.status, venue: "curve", reason: p.reason, closedAt: p.closedAt, held: p.held, realizedWei: p.realizedWei, basisWei: p.basisWei });
+      }
       renderMode(); renderRules();
     } else if (e.kind === "tick") { state.lastTick = Date.now(); state.health = e.health || null; if (state.paused !== !!e.paused) { state.paused = !!e.paused; renderMode(); } }
-    else if (e.kind === "launch") { state.seen++; state.tempo.push(e.t); if (state.tempo.length > 500) state.tempo.shift(); addRow(e, true); if (e.fire) { bump("st-seen"); } }
-    else if (e.kind === "fire") { state.fired++; bump("st-fire"); beep(); state.pos.set(e.positionId, { symbol: e.symbol.replace(/^\$/, ""), ethIn: e.ethIn, pnl: 0, status: "open", venue: "curve" }); toast(`${state.live ? "bought" : "dry fire"} ${e.symbol} at tax ${(e.taxBps / 100).toFixed(2)}% after ${e.waitedMs} ms`); }
-    else if (e.kind === "mark") { const p = state.pos.get(e.positionId); if (p) { p.pnl = e.pnlPct; p.venue = e.venue; p.peak = e.peakPct; } }
-    else if (e.kind === "exit") { const p = state.pos.get(e.positionId); if (p) { p.pnl = e.pnlPct; p.status = "closed"; p.reason = e.reason; p.closedAt = Date.now(); state.pnl += BigInt(e.ethOut) - BigInt(p.ethIn); bump("st-pnl"); } }
+    else if (e.kind === "launch") {
+      // Replays in the SSE prelude re-send launches already counted live.
+      if (state.rows.has(e.token)) return;
+      if (!e.replay) { state.seen++; state.tempo.push(e.t); if (state.tempo.length > 500) state.tempo.shift(); }
+      addRow(e, !e.replay); if (e.fire && !e.replay) { bump("st-seen"); }
+    }
+    else if (e.kind === "fire") {
+      if (state.pos.has(e.positionId)) return;
+      state.fired++; bump("st-fire"); beep();
+      state.pos.set(e.positionId, { symbol: (e.symbol || "?").replace(/^\$/, ""), ethIn: e.ethIn, pnl: 0, status: "open", venue: "curve", held: e.tokens, realizedWei: "0", closing: false });
+      toast(`${state.live ? "bought" : "dry fire"} ${e.symbol} at tax ${(e.taxBps / 100).toFixed(2)}%${e.simulated ? " (simulated)" : ` after ${e.waitedMs} ms`}`);
+    }
+    else if (e.kind === "hold") { if (state.live && e.why?.length) toast(`held ${short(e.token)}: ${e.why[0]}`); }
+    else if (e.kind === "entry") {
+      const label = { reverted: "reverted on-chain", unresolved: "accepted, no receipt yet — it may still land", no_fill: "confirmed but no tokens received" }[e.status] || e.status;
+      toast(`entry ${short(e.token)}: ${label}`);
+    }
+    else if (e.kind === "mark") { const p = state.pos.get(e.positionId); if (p && p.status === "open") { p.pnl = e.pnlPct; p.venue = e.venue; p.peak = e.peakPct; } }
+    else if (e.kind === "exit") {
+      const p = state.pos.get(e.positionId); if (p) {
+        p.pnl = e.pnlPct; p.reason = e.reason; p.venue = e.venue; p.held = e.tokensLeft;
+        if (e.ethIn != null) p.ethIn = e.ethIn;
+        if (e.basisWei != null) p.basisWei = e.basisWei;
+        if (e.realizedTotalWei !== undefined) p.realizedWei = e.realizedTotalWei;
+        p.closing = false;
+        if (e.closed) { p.status = "closed"; p.closedAt = e.closedAt ?? Date.now(); }
+        bump("st-pnl");
+        toast(`${e.closed ? "closed" : "trimmed"} $${p.symbol} · ${e.reason} · ${fmtPnl(e.pnlPct)}`);
+      }
+    }
+    else if (e.kind === "close_error" || e.kind === "exit_error") {
+      const p = state.pos.get(e.positionId);
+      if (p) { p.closing = !!e.pending; }
+      toast(e.message || "close failed");
+      renderPositions();
+    }
     else if (e.kind === "paused") { state.paused = !!e.paused; renderMode(); }
     else if (e.kind === "rules") { state.rules = e.rules; renderRules(); }
     else if (e.kind === "index") { toast(`deployer index: ${e.launches} launches, ${e.graduations} graduations`); }
@@ -446,7 +544,7 @@
     es.onerror = () => { state.connected = false; $("mode-text").textContent = "reconnecting"; };
   }
   connect();
-  setInterval(() => { $("clock").textContent = new Date().toISOString().slice(11, 19) + " UTC"; render(); renderNotice(); }, 1000);
+  setInterval(() => { $("clock").textContent = timeFormatter.format(new Date()) + " UTC"; render(); renderNotice(); }, 1000);
 
   /* keys */
   document.addEventListener("keydown", (ev) => {
@@ -460,7 +558,7 @@
 
   /* easter eggs: five taps on the mark, or the old code */
   let taps = 0, tapTimer;
-  function runCat() { const cat = $("cat"); cat.classList.remove("run"); void cat.offsetWidth; cat.classList.add("run"); toast("pixel cat says the tax is gone"); }
+  function runCat() { const cat = $("cat"); cat.classList.remove("run"); requestAnimationFrame(() => requestAnimationFrame(() => cat.classList.add("run"))); toast("pixel cat says the tax is gone"); }
   $("mark").onclick = () => { taps++; clearTimeout(tapTimer); tapTimer = setTimeout(() => (taps = 0), 900); if (taps >= 5) { taps = 0; runCat(); } };
   const KONAMI = ["ArrowUp","ArrowUp","ArrowDown","ArrowDown","ArrowLeft","ArrowRight","ArrowLeft","ArrowRight","b","a"]; let kpos = 0;
   document.addEventListener("keydown", (ev) => { kpos = ev.key === KONAMI[kpos] ? kpos + 1 : ev.key === KONAMI[0] ? 1 : 0; if (kpos === KONAMI.length) { kpos = 0; document.body.classList.toggle("konami"); runCat(); } });

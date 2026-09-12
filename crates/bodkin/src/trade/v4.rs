@@ -2,8 +2,8 @@ use crate::abi::{factory, stateView, universalRouter, v4Quoter};
 use crate::chain::{ADDR, ZERO};
 use crate::rpc::{Lane, Rpc};
 use alloy::primitives::{
-    aliases::{I24, U24},
     Address, B256, Bytes, U256,
+    aliases::{I24, U24},
 };
 use alloy::sol_types::{SolCall, SolValue};
 
@@ -17,8 +17,18 @@ pub struct PoolKey {
 }
 
 pub fn pons_pool_key(token: Address, pair_token: Address, tick_spacing: i32) -> PoolKey {
-    let (c0, c1) = if token < pair_token { (token, pair_token) } else { (pair_token, token) };
-    PoolKey { currency0: c0, currency1: c1, fee: 0, tick_spacing, hooks: ADDR.pons_hook }
+    let (c0, c1) = if token < pair_token {
+        (token, pair_token)
+    } else {
+        (pair_token, token)
+    };
+    PoolKey {
+        currency0: c0,
+        currency1: c1,
+        fee: 0,
+        tick_spacing,
+        hooks: ADDR.pons_hook,
+    }
 }
 
 pub fn pool_id(k: &PoolKey) -> B256 {
@@ -33,39 +43,61 @@ pub fn pool_id(k: &PoolKey) -> B256 {
 }
 
 pub async fn pool_key_for(rpc: &Rpc, token: Address) -> anyhow::Result<(PoolKey, Address, u8)> {
-    let r = rpc.eth_call(Lane::Enrich, ADDR.pons_factory, factory::getLaunchedTokenCall { token }, None).await?;
+    let r = rpc
+        .eth_call(
+            Lane::Enrich,
+            ADDR.pons_factory,
+            factory::getLaunchedTokenCall { token },
+            None,
+        )
+        .await?;
     if !r.exists {
         anyhow::bail!("not a pons v2 token");
     }
-    Ok((pons_pool_key(token, r.pairToken, i32::try_from(r.tickSpacing).unwrap_or(0)), r.pairToken, r.phase))
+    Ok((
+        pons_pool_key(
+            token,
+            r.pairToken,
+            i32::try_from(r.tickSpacing).unwrap_or(0),
+        ),
+        r.pairToken,
+        r.phase,
+    ))
 }
 
-#[derive(Debug, Clone)]
-pub struct PoolState {
-    pub sqrt_price_x96: U256,
-    pub tick: i32,
-    pub liquidity: u128,
+pub async fn pool_liquidity(rpc: &Rpc, key: &PoolKey) -> anyhow::Result<u128> {
+    rpc.eth_call(
+        Lane::Background,
+        ADDR.v4_state_view,
+        stateView::getLiquidityCall {
+            poolId: pool_id(key),
+        },
+        None,
+    )
+    .await
 }
 
-pub async fn pool_state(rpc: &Rpc, key: &PoolKey) -> anyhow::Result<PoolState> {
-    let id = pool_id(key);
-    let slot = rpc.eth_call(Lane::Background, ADDR.v4_state_view, stateView::getSlot0Call { poolId: id }, None).await?;
-    let liq = rpc.eth_call(Lane::Background, ADDR.v4_state_view, stateView::getLiquidityCall { poolId: id }, None).await?;
-    Ok(PoolState {
-        sqrt_price_x96: U256::from(slot.sqrtPriceX96),
-        tick: i32::try_from(slot.tick).unwrap_or(0),
-        liquidity: u128::try_from(liq).unwrap_or(0),
-    })
-}
-
-pub async fn quote_v4(rpc: &Rpc, key: &PoolKey, zero_for_one: bool, amount_in: U256) -> anyhow::Result<U256> {
+pub async fn quote_v4(
+    rpc: &Rpc,
+    key: &PoolKey,
+    zero_for_one: bool,
+    amount_in: U256,
+) -> anyhow::Result<U256> {
+    let exact: u128 = try_u128(amount_in)?;
     let params = v4Quoter::QuoteExactSingleParams {
         poolKey: v4_key(key),
         zeroForOne: zero_for_one,
-        exactAmount: amount_in.try_into().unwrap_or(0),
+        exactAmount: exact,
         hookData: Bytes::new(),
     };
-    let ret = rpc.eth_call(Lane::Hot, ADDR.v4_quoter, v4Quoter::quoteExactInputSingleCall { params }, None).await?;
+    let ret = rpc
+        .eth_call(
+            Lane::Hot,
+            ADDR.v4_quoter,
+            v4Quoter::quoteExactInputSingleCall { params },
+            None,
+        )
+        .await?;
     Ok(ret.amountOut)
 }
 
@@ -86,25 +118,67 @@ const ACT_SWAP: u8 = 0x06;
 const ACT_SETTLE: u8 = 0x0c;
 const ACT_TAKE: u8 = 0x0f;
 
-pub fn encode_v4_swap(key: &PoolKey, zero_for_one: bool, amount_in: U256, amount_out_min: U256, layout: RouterLayout, deadline: u64) -> SwapCall {
+pub fn encode_v4_swap(
+    key: &PoolKey,
+    zero_for_one: bool,
+    amount_in: U256,
+    amount_out_min: U256,
+    layout: RouterLayout,
+    deadline: u64,
+) -> anyhow::Result<SwapCall> {
     let actions = Bytes::from(vec![ACT_SWAP, ACT_SETTLE, ACT_TAKE]);
     let pk = v4_key(key);
+    let (in128, min128) = (try_u128(amount_in)?, try_u128(amount_out_min)?);
     let swap = match layout {
-        RouterLayout::Current => (pk.clone(), zero_for_one, u128_of(amount_in), u128_of(amount_out_min), U256::ZERO, Bytes::new()).abi_encode(),
-        RouterLayout::Legacy => (pk, zero_for_one, u128_of(amount_in), u128_of(amount_out_min), Bytes::new()).abi_encode(),
+        RouterLayout::Current => (
+            pk.clone(),
+            zero_for_one,
+            in128,
+            min128,
+            U256::ZERO,
+            Bytes::new(),
+        )
+            .abi_encode(),
+        RouterLayout::Legacy => (pk, zero_for_one, in128, min128, Bytes::new()).abi_encode(),
     };
-    let c_in = if zero_for_one { key.currency0 } else { key.currency1 };
-    let c_out = if zero_for_one { key.currency1 } else { key.currency0 };
+    let c_in = if zero_for_one {
+        key.currency0
+    } else {
+        key.currency1
+    };
+    let c_out = if zero_for_one {
+        key.currency1
+    } else {
+        key.currency0
+    };
     let settle = (c_in, amount_in).abi_encode();
     let take = (c_out, amount_out_min).abi_encode();
-    let input = (actions, vec![Bytes::from(swap), Bytes::from(settle), Bytes::from(take)]).abi_encode();
+    let input = (
+        actions,
+        vec![Bytes::from(swap), Bytes::from(settle), Bytes::from(take)],
+    )
+        .abi_encode();
     let commands = Bytes::from(vec![CMD_V4_SWAP]);
-    let data = Bytes::from(universalRouter::executeCall { commands, inputs: vec![Bytes::from(input)], deadline: U256::from(deadline) }.abi_encode());
-    SwapCall { to: ADDR.universal_router, data, value: if c_in == ZERO { amount_in } else { U256::ZERO } }
+    let data = Bytes::from(
+        universalRouter::executeCall {
+            commands,
+            inputs: vec![Bytes::from(input)],
+            deadline: U256::from(deadline),
+        }
+        .abi_encode(),
+    );
+    Ok(SwapCall {
+        to: ADDR.universal_router,
+        data,
+        value: if c_in == ZERO { amount_in } else { U256::ZERO },
+    })
 }
 
-fn u128_of(v: U256) -> u128 {
-    v.try_into().unwrap_or(u128::MAX)
+/// A saturating clamp here would silently turn a bad amount into `u128::MAX` —
+/// for `minOut` that means an always-reverting swap. Error instead.
+fn try_u128(v: U256) -> anyhow::Result<u128> {
+    v.try_into()
+        .map_err(|_| anyhow::anyhow!("amount does not fit u128"))
 }
 
 fn u24(n: u32) -> U24 {
@@ -127,8 +201,18 @@ fn v4_key(key: &PoolKey) -> v4Quoter::PoolKey {
 
 pub async fn detect_router_layout(rpc: &Rpc, key: &PoolKey) -> anyhow::Result<RouterLayout> {
     for layout in [RouterLayout::Current, RouterLayout::Legacy] {
-        let call = encode_v4_swap(key, true, U256::from(100_000_000_000_000u64), U256::ZERO, layout, 1);
-        if rpc.eth_call_raw(Lane::Background, call.to, &call.data).await.is_ok() {
+        if let Ok(call) = encode_v4_swap(
+            key,
+            true,
+            U256::from(100_000_000_000_000u64),
+            U256::ZERO,
+            layout,
+            1,
+        ) && rpc
+            .eth_call_raw(Lane::Background, call.to, &call.data)
+            .await
+            .is_ok()
+        {
             return Ok(layout);
         }
     }

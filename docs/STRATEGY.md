@@ -76,14 +76,13 @@ On the curve, stop-loss is replaced by **stale** and **insider sell**. Ladder ta
 |---|---|---|
 | ladder | 34 % at +100 %, 33 % at +300 % | `EXIT_LADDER` |
 | stale | <2 % progress after 90 s | `STALE_SEC`, `STALE_MIN_PROGRESS` |
-| insider sold | full exit | `ABORT_IF_INSIDER_SOLD` (gate) / FlowTracker |
+| insider sold | full exit | continuously refreshed, reorg-reversible FlowTracker |
 | take profit (post-grad) | +80 % | `TAKE_PROFIT_PCT` |
 | stop loss (post-grad) | −35 % | `STOP_LOSS_PCT` |
 | trailing stop (post-grad) | 25 % below the peak | `TRAILING_PCT` |
 | max hold (post-grad) | 45 min | `MAX_HOLD_MIN` |
 
-Marks come from a real quote (curve `quoteSell` or `V4Quoter`), so a mark already includes the 1 % fee, the creator tax and
-price impact of selling the whole position. A fresh 0.01 ETH entry marks around −10 % immediately; that is the round trip, not a loss yet.
+Marks come from a real quote (curve `quoteSell` or `V4Quoter`), so a mark includes the 1 % fee, creator tax, price impact, and the remaining allocated entry gas. Prospective exit gas is unknown until a receipt lands; closed-position PnL includes actual approval/sell gas plus any resolved failed-exit gas charged idempotently to that position. A fresh 0.01 ETH entry can therefore mark around −10 % immediately; that is a quote, not a realized loss.
 
 ## Graduation
 
@@ -99,7 +98,7 @@ launch in forty-four graduates.
   slips through; `--keyword` and `--deployer` narrow the feed further.
 - **Fee recipient identity.** `third party` tells you the fees leave the deployer; it cannot tell you who receives them.
 - **Stock-token pairs.** FDV in NVDA or MSFT units is shown without a USD figure; the board and the feed do not price stock tokens.
-- **One engine per `data/` directory.** `snipe` and `board` both write `data/positions.json`; run one of them at a time.
+- **One execution owner per `data/` directory.** redb exclusively locks `data/bodkin.redb`; a concurrent engine or live command refuses rather than sharing nonces or portfolio state.
 
 ## Things the strategy does not do
 

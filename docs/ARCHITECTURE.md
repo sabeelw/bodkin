@@ -1,7 +1,6 @@
 # Architecture
 
-Bodkin is one Rust process. No database, no service, no daemon: `data/` holds JSON / JSONL, and every number on screen was read from
-Robinhood Chain in the last few seconds.
+Bodkin is one Rust process with no database service or daemon. An embedded redb file is the authoritative local state; JSON / JSONL files are human-readable exports and observations. Every live mark on screen was read from Robinhood Chain in the last few seconds.
 
 ```
 Cargo.toml                 workspace
@@ -9,18 +8,22 @@ crates/bodkin/src/
   main.rs                  clap: doctor hunt board snipe watch scan fees
                            dev buy sell positions wallet claim helper
                            outcomes replay
-  chain.rs                 chain 4663, ADDR, sequencer / feed defaults
-  rpc.rs                   lanes hot > enrich > background; race(); 429 bench
-  pons/{curve,tax,clock,launches,enrich,stream,fingerprint,deployer,feed}.rs
+  chain.rs                 chain 4663, ADDR, RPC and sequencer defaults
+  rpc.rs                   lanes hot > enrich > background; BackON retry; latency histogram
+  pons/{curve,tax,clock,launches,enrich,stream,fingerprint,deployer}.rs
   score.rs
   engine.rs                decide, live gate, pick_exit
   run.rs                   snipe loop: burst fire, 1 s marks, outcomes
-  trade/{submitter,burst,wallet,curve,pool,v4,positions}.rs
+  trade/{submitter,burst,wallet,exec,journal,state,curve,pool,v4,positions}.rs
   board.rs                 axum 127.0.0.1 + SSE
-  outcomes.rs / replay.rs
+  outcomes.rs / replay.rs  typed provenance envelopes; deterministic cutoff replay
+data/bodkin.redb           ACID positions + operation journal; exclusive process lock
+data/positions.json        atomic export; imported only when redb has no snapshot
 contracts/                 Foundry: BodkinBuyOnce.sol
 web/board.html             board UI
 ```
+
+`trade/state.rs` opens `data/bodkin.redb` in redb's single-process mode. Immediate-durability transactions commit operation intents before submission and position changes before they are reported. A valid legacy `positions.json` or `transactions.json` is imported once when the corresponding redb table is empty; after that, redb wins and JSON is export-only.
 
 ## Data flow of one launch
 
@@ -41,14 +44,17 @@ flowchart LR
 
 ## Why these choices
 
-- **Subscription first, polling second.** Robinhood Chain has no public mempool. The earliest anyone can see a launch is the block it
-  landed in. Raced websockets (publicnode + whatever you add) plus a watchdog that walks last-seen → head after 45 s of silence.
-- **Optional sequencer feed.** `FEED_URL` with header `Arbitrum-Requested-Sequence-Number` (empty header = ~124 s / 1203-msg backlog).
-  Verify `signatureV2` signer `0xDaa526086787d9DEbE1D7F3FFdb1fE50cf8687F4`. Useful to pre-sign; from Europe it does not beat publicnode `newHeads`.
+- **Subscription first, polling second.** Robinhood Chain has no public mempool. Raced websocket logs use an LRU identity set and process `removed` notifications; the watchdog walks a contiguous last-scanned → head range after silence. Entry enrichment revalidates the launch transaction before anything can fire.
+- **No sequencer-feed shortcut.** The prior stub trusted a claimed signer field instead of cryptographically verifying `signatureV2`, so it was unreachable and has been removed. Detection remains receipt/log-backed websocket plus watchdog polling.
 - **Two public endpoints, one gate, no JSON-RPC batches.** Official RPC 429s bursts and meters `eth_getLogs`; publicnode refuses logs.
-  Lanes (hot / enrich / background), spacing, cooldown, per-endpoint bench. Fifteen curve/token/factory reads go through Multicall3.
+  Lanes (hot / enrich / background), spacing, cooldown, per-endpoint bench. BackON supplies bounded jittered retry timing and `Retry-After`; endpoint capabilities and hot-lane reservations remain Bodkin-specific. Permits remain held through response-body consumption, and HDR percentiles expose total call latency. Fifteen curve/token/factory reads go through Multicall3.
+- **Ordered flow with rollback.** FlowTracker stores canonical event identities in block/transaction/log order. Duplicates replace rather than increment, removed logs reverse their effects, and a changed block-hash anchor rewinds and rebuilds from the launch block. Curve positions refresh that cursor before evaluating exits.
+- **Canonical execution.** A mined receipt must contain the requested transaction hash, status, block number/hash, logs, gas used, and effective gas price; its block hash must match `eth_getBlockByNumber`. Applied operations are rechecked for 64 blocks at startup and every ten seconds while live. Any changed receipt halts execution.
+- **Embedded transactional state, readable exports.** redb provides immediate-durability ACID commits, crash recovery, integrity checks, and exclusive process locking for positions and transaction operations. `atomic-write-file` refreshes JSON exports without making them authoritative.
+- **Commodity parsing stays in crates.** dotenvy parses `.env` without mutating process globals; Alloy parses ETH units; strip-ansi-escapes plus unicode-segmentation/unicode-width own terminal text boundaries. LRU owns bounded launch deduplication, HDR Histogram owns latency distributions, and Alloy enables only consensus, EIP encoding, signing, RPC types and ABI support—not `full` or its provider stack. Jsonrpsee owns the two bounded websocket subscriptions.
+- **Replay is causal.** Schema-2 observations carry run, sequence, chain, and version provenance. Enrichment pins Multicall3 to a canonical EIP-1898 block hash and records that block/timestamp; replay applies only later ordered buy/sell/fee/tax events strictly before the candidate entry second. Missing provenance remains unmeasured, and each experiment prints a dataset hash plus strategy manifest.
 - **Sequencer is write-only.** `https://sequencer.mainnet.chain.robinhood.com` accepts `eth_sendRawTransaction` (and Sync / Conditional).
-  It **blocks until the block is built** (~100 ms). Client timeout > 12 s (`queue-timeout`). Parallel conns or a burst is eight serial blocks.
+  It **blocks until the block is built** (~100 ms). Client timeout > 12 s (`queue-timeout`). Each resolved IP keeps one persistent warm Reqwest client; the first nonce is sprayed across them and later attempts reuse those pools.
 - **No recommended fillers on the hot path.** Nonce, gas, max fee (3× cached base), priority 0, type-2, chain 4663 are local.
   `PrivateKeySigner::sign_transaction_sync`. Alloy is not used for send.
 - **BuyOnce helper.** Reverts unless `currentSnipeTaxBps(recipient) ≤ maxTaxBps` and `balanceOf(recipient) == 0`. Early helper reverts

@@ -8,9 +8,12 @@ data/
 assets/*.txt
 assets/ref/
 .claude/
+.cursor/
+/CLAUDE.md
 out/
 cache/
 broadcast/
 contracts/lib/
 contracts/out/
 contracts/cache/
+.playwright-mcp/

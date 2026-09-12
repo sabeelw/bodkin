@@ -5,7 +5,7 @@
 - The only secret is `PRIVATE_KEY` in your own `.env`. It is read by `trade/wallet.rs` and used to sign transactions sent to the sequencer
   (or the fallback RPC). It is never printed, logged, written to `data/`, or sent anywhere else.
 - Use a fresh wallet with only what you are willing to lose in a session. Bodkin never asks for more than one buy at a time.
-- `.env` is git-ignored. `data/positions.json` contains token addresses and amounts, not keys.
+- `.env` is git-ignored. `data/bodkin.redb` contains positions and transaction metadata, never keys. `positions.json` and `transactions.json` are human-readable exports with addresses and amounts.
 
 ## Dry run is the default
 
@@ -15,13 +15,10 @@ further: even in dry run it opens as a feed and fires nothing until you press st
 
 ## Four walls around a live session
 
-1. **The confirmation.** `--live` prints the signer's address, its balance, the size per buy, the position cap and the session budget, refuses
-   if the balance does not cover one buy, and waits for you to type `arm`. On the board the same session needs the button too.
+1. **The confirmation.** `--live` prints the signer, balance, buy size, worst-case burst-gas reservation, position cap, and session budget. It refuses unless balance and budget cover one buy plus that gas reserve, then waits for `arm`; the live board also needs its button.
 2. **The buy size** (`--eth`, `SNIPE_ETH`): what one entry costs. Default 0.01 ETH.
 3. **The position cap** (`--max-open`): how many entries can be open at once. Default 3.
-4. **The session budget** (`--budget`, `SNIPE_BUDGET_ETH`): the total ETH entries may consume in one run. Default 0.05 ETH. When it is
-   reached every further launch is refused with `session budget reached`, whatever its score. A wallet that holds only the budget cannot
-   lose more than the budget.
+4. **The session budget** (`--budget`, `SNIPE_BUDGET_ETH`): entry value plus conservative worst-case gas reserved for every live burst. Resolved receipts replace the reservation with actual entry value and mined gas; unresolved attempts retain the full reservation. Default 0.05 ETH. Once exhausted, later launches refuse regardless of score.
 
 Start with a fresh wallet holding the budget and nothing else. Raise the numbers after you have watched the exits work for a session.
 
@@ -31,7 +28,9 @@ Start with a fresh wallet holding the budget and nothing else. Raise the numbers
 |---|---|---|
 | the curve graduates between quote and send | `minTokensOut` bounds the rate; a clamped fill at that rate settles, a worse one reverts | recover gas spent on a revert |
 | a launch is a honeypot on the pool side | the curve itself is protocol code; the pons v4 hook is the same singleton for every launch | guarantee a token's *pool* behaves if the protocol changes |
-| a public RPC rate-limits or challenges the client | one gate for every request: two endpoints with capabilities, bounded concurrency, spacing, a cooldown after a 429, a penalty box, retries that wait; detection over a websocket needs no polling | make a public endpoint faster; set `RPC_URL` / `RPC_WS_URL` to a provider |
+| a public RPC rate-limits or challenges the client | one lane-aware gate for every request, reserved hot capacity, endpoint penalties, and bounded BackON retries with jitter and `Retry-After`; websocket detection is reconciled by polling | make a public endpoint faster; set `RPC_URL` / `RPC_WS_URL` to a provider |
+| a submitted transaction has no definitive receipt | records hash/nonce before sending, retains risk reservations, and blocks execution until recovery | prove failure merely from a timeout |
+| a receipt or launch is reorged | verifies receipt block hashes, rechecks applied operations for 64 blocks, reverses removed flow logs, and rebuilds changed cursors | prevent the chain itself from reorganizing |
 | the sequencer's compliance filter voids a transaction | none; it is protocol-level | anything |
 | stop-loss fires into a thin curve | marks are real quotes for the full position size, so the exit price is what the mark showed | avoid slippage on an illiquid curve |
 | a launch farm passes every per-launch rule | the fingerprint rule refuses the third identical launch inside half an hour | catch a farm that varies its numbers |
@@ -41,7 +40,7 @@ Start with a fresh wallet holding the budget and nothing else. Raise the numbers
 
 It listens on 127.0.0.1 only. It can pause and resume firing, close an open position at the current quote, and change five numeric rules
 inside fixed bounds. It cannot buy on demand and cannot switch a dry run to live: `--live` is decided when you start it. Anyone on your
-machine can open it; nobody outside can. If several people share the machine, start it with a different `--port` and assume they can click.
+machine can open it; nobody outside can. Start/resume refuses while the chain clock is stale or unstable, close retries are idempotent, and an SSE lag forces a fresh authoritative snapshot. If several people share the machine, start it with a different `--port` and assume they can click.
 
 ## Fees and taxes you pay on every trade
 

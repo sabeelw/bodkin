@@ -1,9 +1,10 @@
 use crate::chain::BPS;
 use alloy::primitives::U256;
+use serde::{Deserialize, Serialize};
 
 /// Curve pricing in the protocol's integer order. Fees come off the input on a buy
 /// and off the output on a sell; the opening tax only ever applies to buys.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurveState {
     pub quote_reserve: U256,
     pub token_reserve: U256,
@@ -18,6 +19,10 @@ pub struct CurveState {
     pub ready_to_graduate: bool,
     pub launched_at: u64,
     pub read_at_ms: u64,
+    #[serde(default)]
+    pub read_block: u64,
+    #[serde(default)]
+    pub read_chain_ts: u64,
     /// Snapshotted on the curve in `initialize`. Factory params are owner-mutable.
     pub snipe_tax_start_bps: U256,
     pub snipe_tax_seconds: U256,
@@ -39,6 +44,8 @@ impl Default for CurveState {
             ready_to_graduate: false,
             launched_at: 0,
             read_at_ms: 0,
+            read_block: 0,
+            read_chain_ts: 0,
             snipe_tax_start_bps: U256::from(9900u64),
             snipe_tax_seconds: U256::from(3u64),
         }
@@ -85,7 +92,11 @@ pub fn quote_buy(s: &CurveState, quote_in: U256) -> BuyQuote {
     let fee = spent * s.fee_bps / U256::from(BPS);
     let tax = spent * s.creator_tax_bps / U256::from(BPS);
     let opening = spent * open_bps / U256::from(BPS);
-    let mut tokens_out = amount_out(spent - fee - tax - opening, s.quote_reserve, s.token_reserve);
+    let mut tokens_out = amount_out(
+        spent - fee - tax - opening,
+        s.quote_reserve,
+        s.token_reserve,
+    );
     let mut clamped = false;
     if tokens_out > s.sellable_tokens {
         clamped = true;
@@ -93,7 +104,11 @@ pub fn quote_buy(s: &CurveState, quote_in: U256) -> BuyQuote {
         let net = amount_in(s.sellable_tokens, s.quote_reserve, s.token_reserve);
         let denom = U256::from(BPS) - s.fee_bps - s.creator_tax_bps - open_bps;
         let grossed = ceil_div(net * U256::from(BPS), denom);
-        spent = if grossed < quote_in { grossed } else { quote_in };
+        spent = if grossed < quote_in {
+            grossed
+        } else {
+            quote_in
+        };
     }
     BuyQuote {
         tokens_out,
@@ -117,12 +132,18 @@ pub fn min_out_from_rate(quote: U256, slippage_bps: u64) -> U256 {
 }
 
 /// Size `minTokensOut` as if this buy is last in the entry block (same-block siblings have already taken).
-pub fn min_out_as_last_in_block(s: &CurveState, our_quote: U256, sibling_quote: U256, slippage_bps: u64) -> U256 {
+pub fn min_out_as_last_in_block(
+    s: &CurveState,
+    our_quote: U256,
+    sibling_quote: U256,
+    slippage_bps: u64,
+) -> U256 {
     let after_siblings = {
         let q = quote_buy(s, sibling_quote);
         let mut next = s.clone();
         let spent = q.spent;
-        let fee_tax = spent * (s.fee_bps + s.creator_tax_bps + effective_opening_bps(s)) / U256::from(BPS);
+        let fee_tax =
+            spent * (s.fee_bps + s.creator_tax_bps + effective_opening_bps(s)) / U256::from(BPS);
         next.quote_reserve += spent - fee_tax;
         next.token_reserve = next.token_reserve.saturating_sub(q.tokens_out);
         next.sellable_tokens = next.sellable_tokens.saturating_sub(q.tokens_out);
@@ -149,20 +170,9 @@ pub fn progress(s: &CurveState) -> f64 {
         return 0.0;
     }
     let p = u256_to_f64(s.real_quote_reserve) / u256_to_f64(s.graduation_threshold);
-    if p > 1.0 {
-        1.0
-    } else {
-        p
-    }
+    if p > 1.0 { 1.0 } else { p }
 }
 
-fn u256_to_f64(v: U256) -> f64 {
-    // Enough precision for display and the Node fixture comparisons (1e-6 .. 1e-12).
-    let mut acc = 0.0f64;
-    let mut base = 1.0f64;
-    for limb in v.as_limbs() {
-        acc += (*limb as f64) * base;
-        base *= 2.0f64.powi(64);
-    }
-    acc
+fn u256_to_f64(value: U256) -> f64 {
+    f64::from(value)
 }

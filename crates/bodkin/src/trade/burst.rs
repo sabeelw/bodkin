@@ -2,17 +2,20 @@ use super::submitter::{SendOutcome, Submitter};
 use super::wallet::Wallet;
 use crate::pons::clock::ChainClock;
 use crate::pons::tax::boundary_instant;
-use alloy::primitives::{Address, Bytes, B256, U256};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use alloy::primitives::{Address, B256, Bytes, U256};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BurstClass {
-    Fill,
+    /// A send was accepted with a hash. NOT a fill — reconcile via receipt
+    /// before opening a position.
+    Submitted,
     HelperRevert,
     LateDup,
     NonceGap,
+    /// The armed flag went false between signing and the fire instant.
+    Aborted,
     ShadowWouldLand,
 }
 
@@ -24,29 +27,12 @@ pub struct SignedTx {
 }
 
 #[derive(Debug, Clone)]
-pub struct BurstPlan {
-    pub txs: Vec<SignedTx>,
-    pub fire_at_unix: u64,
-    pub lead_ms: u64,
-}
-
-#[derive(Debug, Clone)]
 pub struct BurstResult {
     pub class: BurstClass,
     pub hash: Option<B256>,
     pub attempt: usize,
-    pub landed_block: Option<u64>,
     pub message: String,
-}
-
-pub fn classify_send(out: &SendOutcome, first_ok: bool) -> BurstClass {
-    match out {
-        SendOutcome::Hash(_) if first_ok => BurstClass::Fill,
-        SendOutcome::Known => BurstClass::LateDup,
-        SendOutcome::Revert { .. } => BurstClass::HelperRevert,
-        SendOutcome::Reject { message, .. } if message.contains("nonce") => BurstClass::NonceGap,
-        _ => BurstClass::NonceGap,
-    }
+    pub outcomes: Vec<(usize, SendOutcome)>,
 }
 
 pub struct BurstCtl {
@@ -89,10 +75,22 @@ pub fn presign_burst(
     n: usize,
 ) -> anyhow::Result<Vec<SignedTx>> {
     let nonces = wallet.take_nonces(n as u32);
+    let start = nonces
+        .first()
+        .copied()
+        .unwrap_or_else(|| wallet.peek_nonce());
     let mut out = Vec::with_capacity(n);
     for nonce in nonces {
-        let (hash, raw) = wallet.sign_eip1559(helper, value, calldata.clone(), nonce, clock)?;
-        out.push(SignedTx { nonce, hash, raw });
+        match wallet.sign_eip1559(helper, value, calldata.clone(), nonce, clock) {
+            Ok((hash, raw)) => out.push(SignedTx { nonce, hash, raw }),
+            Err(e) => {
+                anyhow::ensure!(
+                    wallet.rewind_nonces(start, n as u64),
+                    "burst signing failed and its nonce range could not be rewound: {e}"
+                );
+                return Err(e);
+            }
+        }
     }
     Ok(out)
 }
@@ -100,85 +98,142 @@ pub fn presign_burst(
 /// Fire all signed txs in the same millisecond. Hedge: spray nonce 0 to all 3 IPs.
 pub async fn fire_burst(sub: &Submitter, txs: &[SignedTx], spray_first: bool) -> BurstResult {
     if txs.is_empty() {
-        return BurstResult { class: BurstClass::NonceGap, hash: None, attempt: 0, landed_block: None, message: "empty burst".into() };
+        return BurstResult {
+            class: BurstClass::NonceGap,
+            hash: None,
+            attempt: 0,
+            message: "empty burst".into(),
+            outcomes: Vec::new(),
+        };
     }
     let t0 = Instant::now();
     let mut futs = Vec::new();
     for (i, tx) in txs.iter().enumerate() {
         if i == 0 && spray_first {
-            futs.push(futures::future::Either::Left(async move { (0usize, sub.spray(&tx.raw).await) }));
+            futs.push(futures_util::future::Either::Left(async move {
+                (0usize, sub.spray(&tx.raw).await)
+            }));
         } else {
             let raw = tx.raw.clone();
-            futs.push(futures::future::Either::Right(async move { (i, sub.send_raw(&raw).await) }));
+            futs.push(futures_util::future::Either::Right(async move {
+                (i, sub.send_raw(&raw).await)
+            }));
         }
     }
-    let results = futures::future::join_all(futs).await;
+    let results = futures_util::future::join_all(futs).await;
+    let outcomes = results.clone();
+    // Prefer an accepted hash over a later-indexed revert/dup: an accepted send
+    // is the only outcome worth reconciling against a receipt.
+    let mut first_revert: Option<(usize, SendOutcome)> = None;
+    let mut first_known: Option<usize> = None;
     for (i, out) in results {
         match out {
             SendOutcome::Hash(h) => {
                 return BurstResult {
-                    class: BurstClass::Fill,
+                    class: BurstClass::Submitted,
                     hash: Some(h),
                     attempt: i,
-                    landed_block: None,
-                    message: format!("fill attempt {i} in {} ms", t0.elapsed().as_millis()),
+                    message: format!("submitted attempt {i} in {} ms", t0.elapsed().as_millis()),
+                    outcomes,
                 };
             }
-            SendOutcome::Revert { hash, message } => {
-                return BurstResult {
-                    class: BurstClass::HelperRevert,
-                    hash,
-                    attempt: i,
-                    landed_block: None,
-                    message,
-                };
+            SendOutcome::Revert { .. } => {
+                if first_revert.is_none() {
+                    first_revert = Some((i, out));
+                }
             }
-            SendOutcome::Known => {
-                return BurstResult {
-                    class: BurstClass::LateDup,
-                    hash: Some(txs[i].hash),
-                    attempt: i,
-                    landed_block: None,
-                    message: "already known".into(),
-                };
+            SendOutcome::Known if first_known.is_none() => {
+                first_known = Some(i);
             }
             _ => {}
         }
     }
-    BurstResult { class: BurstClass::NonceGap, hash: None, attempt: 0, landed_block: None, message: "no inclusion".into() }
+    if let Some(i) = first_known {
+        return BurstResult {
+            class: BurstClass::LateDup,
+            hash: Some(txs[i].hash),
+            attempt: i,
+            message: "already known".into(),
+            outcomes,
+        };
+    }
+    if let Some((i, SendOutcome::Revert { message })) = first_revert {
+        return BurstResult {
+            class: BurstClass::HelperRevert,
+            hash: None,
+            attempt: i,
+            message,
+            outcomes,
+        };
+    }
+    BurstResult {
+        class: BurstClass::NonceGap,
+        hash: None,
+        attempt: 0,
+        message: "no inclusion".into(),
+        outcomes,
+    }
 }
 
-/// Sleep until `launched_at + entry_second` minus lead, then fire.
-pub async fn clock_fire(clock: &ChainClock, launched_at: u64, entry_second: u64, lead_ms: u64, sub: &Submitter, txs: &[SignedTx]) -> BurstResult {
+/// Sleep until `launched_at + entry_second` minus lead (in chain time), then
+/// fire. `armed` is re-checked after the sleep so a pause during the wait
+/// aborts before send.
+pub async fn clock_fire(
+    clock: &ChainClock,
+    launched_at: u64,
+    entry_second: u64,
+    lead_ms: u64,
+    sub: &Submitter,
+    txs: &[SignedTx],
+    armed: Option<&std::sync::atomic::AtomicBool>,
+) -> BurstResult {
     let boundary = boundary_instant(launched_at, entry_second);
     let target = boundary.saturating_mul(1000).saturating_sub(lead_ms);
-    let now = crate::pons::clock::now_ms();
-    let adj = (now as i64 + clock.offset_ms()) as u64;
-    if target > adj {
-        tokio::time::sleep(std::time::Duration::from_millis(target - adj)).await;
+    let now_chain = clock.chain_now_ms();
+    if (target as i64) > now_chain {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            (target as i64 - now_chain) as u64,
+        ))
+        .await;
+    }
+    if is_paused(armed) || clock.require_quality(2_000, 1_500).is_err() {
+        return BurstResult {
+            class: BurstClass::Aborted,
+            hash: None,
+            attempt: 0,
+            message: "paused or chain clock became unhealthy before send".into(),
+            outcomes: Vec::new(),
+        };
     }
     fire_burst(sub, txs, true).await
 }
 
-/// Dry-run shadow: send nothing; from newHeads, report which attempt would have been first.
-pub fn shadow_result(launched_at: u64, entry_second: u64, first_plus2_block: u64, our_would_block: Option<u64>) -> BurstResult {
-    let first = first_plus2_block;
-    let land = our_would_block.unwrap_or(first + 3);
-    let ok = land == first;
+fn is_paused(flag: Option<&AtomicBool>) -> bool {
+    flag.is_some_and(|f| f.load(Ordering::SeqCst))
+}
+
+/// Dry-run shadow sends nothing and leaves landing unmeasured.
+pub fn shadow_result(launched_at: u64, entry_second: u64) -> BurstResult {
     BurstResult {
         class: BurstClass::ShadowWouldLand,
         hash: None,
         attempt: 0,
-        landed_block: Some(land),
-        message: if ok {
-            format!("would land in the first block of second {entry_second} (block {first}, launchedAt {launched_at})")
-        } else {
-            format!("would land in block {land}, first +{entry_second} block is {first}")
-        },
+        message: format!(
+            "dry run: would enter at unix {} (+{entry_second}); landing block unmeasured",
+            launched_at + entry_second
+        ),
+        outcomes: Vec::new(),
     }
 }
 
-pub fn encode_buy_once(curve: Address, token: Address, recipient: Address, max_tax_bps: U256, min_tokens_out: U256, max_real_quote: U256) -> Bytes {
+pub fn encode_buy_once(
+    curve: Address,
+    token: Address,
+    recipient: Address,
+    max_tax_bps: U256,
+    min_tokens_out: U256,
+    max_real_quote: U256,
+) -> Bytes {
     use alloy::sol_types::SolCall;
     Bytes::from(
         crate::abi::helper::buyOnceCall {
@@ -193,6 +248,14 @@ pub fn encode_buy_once(curve: Address, token: Address, recipient: Address, max_t
     )
 }
 
-pub fn _arc<T>(x: T) -> Arc<T> {
-    Arc::new(x)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paused_flag_aborts_and_its_absence_permits() {
+        assert!(is_paused(Some(&AtomicBool::new(true))));
+        assert!(!is_paused(Some(&AtomicBool::new(false))));
+        assert!(!is_paused(None));
+    }
 }

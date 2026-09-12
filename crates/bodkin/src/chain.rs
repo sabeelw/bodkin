@@ -1,4 +1,4 @@
-use alloy::primitives::{address, Address};
+use alloy::primitives::{Address, address};
 
 /// Robinhood Chain mainnet. ETH gas, Arbitrum stack, ~100 ms blocks.
 pub const CHAIN_ID: u64 = 4663;
@@ -13,10 +13,6 @@ pub const DEFAULT_HTTP_PUBLICNODE: &str = "https://robinhood-rpc.publicnode.com"
 pub const DEFAULT_HTTP_OFFICIAL: &str = "https://rpc.mainnet.chain.robinhood.com";
 pub const DEFAULT_WS_PUBLICNODE: &str = "wss://robinhood-rpc.publicnode.com";
 pub const DEFAULT_SEQUENCER: &str = "https://sequencer.mainnet.chain.robinhood.com";
-pub const DEFAULT_FEED: &str = "wss://feed.mainnet.chain.robinhood.com";
-
-/// Sequencer-feed `signatureV2` signer (Robinhood Chain).
-pub const FEED_SIGNER: Address = address!("0xDaa526086787d9DEbE1D7F3FFdb1fE50cf8687F4");
 
 pub const ZERO: Address = Address::ZERO;
 pub const DEAD: Address = address!("0x000000000000000000000000000000000000dEaD");
