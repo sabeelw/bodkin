@@ -1,6 +1,10 @@
 @echo off
-rem bodkin snipe: the sniper in dry run, min score 55. Nothing is bought until you start it with --live from a terminal. Ctrl+C or close the window to stop.
+rem bodkin snipe: dry run, min score 55. Nothing is bought until you start it with --live. Ctrl+C to stop.
 cd /d "%~dp0"
-if not exist node_modules (echo installing dependencies... && call npm install)
 if not exist .env copy .env.example .env >nul
-npx tsx src/cli.ts snipe --min-score 55
+where cargo >nul 2>&1 || (echo install Rust from https://rustup.rs && pause && exit /b 1)
+if not exist target\release\bodkin.exe (
+  echo building bodkin...
+  cargo build --release || (pause && exit /b 1)
+)
+target\release\bodkin.exe snipe --min-score 55

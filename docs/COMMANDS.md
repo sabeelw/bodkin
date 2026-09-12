@@ -1,8 +1,8 @@
 # Command reference
 
 Every command, every flag, every environment variable. Run any command with `--help` for the same text in the terminal.
-`bodkin` is the installed binary; from a source checkout use `npx tsx src/cli.ts <command>` or `npm run <script>`. On Windows,
-`start-hunt.cmd`, `start-snipe.cmd` and `start-board.cmd` in the checkout root start those three with a double-click.
+From a source checkout: `cargo run --release -- <command>` or `./target/release/bodkin <command>`. On Windows,
+`start-hunt.cmd`, `start-snipe.cmd` and `start-board.cmd` build `bodkin.exe` then start those three.
 
 Commands that can move money (`snipe`, `buy`, `sell`, `claim`, `board --live`) are **dry run unless you pass `--live`**.
 A dry run reads the same chain state and prints the same decision; it just does not sign.
@@ -22,6 +22,9 @@ A dry run reads the same chain state and prints the same decision; it just does 
 | [`positions`](#positions) | open and closed positions with live marks | no |
 | [`wallet`](#wallet) | the configured signer: address, balance, unclaimed fees | yes |
 | [`claim`](#claim) | claim your creator fees from the pons escrow | only with `--live` |
+| `helper deploy/check` | `BodkinBuyOnce` create / bytecode at `HELPER_ADDRESS` | `--live` to broadcast |
+| `outcomes` | print `data/outcomes.jsonl` lift / hit / landing | no |
+| `replay --hours N` | sampled TokenLaunched vs an alternate entry second | no |
 
 ---
 
@@ -35,8 +38,9 @@ Reads, from the live factory: `launchEnabled`, `launchFee`, `snipeTaxStartBps`, 
 hook, escrow and pool manager the factory points at are the ones bodkin knows. Prints the RPC round trip, launches in the last ~5 minutes,
 ETH/USD, and whether a key is configured.
 
-`--probe` additionally finds the most recent ETH-paired graduation, quotes 0.001 ETH through the Uniswap `V4Quoter`, reads the pool's
-liquidity, and settles the UniversalRouter parameter layout by simulation. If the probe passes, pool-side sells will work.
+`--probe` additionally: per-IP sequencer RTT, a dummy Conditional with a future `timestampMin` (immediate `-32003` means reject-not-wait),
+the most recent ETH-paired graduation through `V4Quoter`, and the UniversalRouter parameter layout. If Conditional queues then drops, do
+not put `timestampMin` on the fire path.
 
 ## hunt
 
@@ -198,7 +202,7 @@ with `--live`, calls `claim()` and prints what arrived.
 | Variable | Default | Used by |
 |---|---|---|
 | `RPC_URL` | publicnode + official RPC | comma-separated, preferred first; `#nologs` after an endpoint that refuses `eth_getLogs`; one private provider can carry everything |
-| `RPC_WS_URL` | publicnode websocket | detection by subscription; `off` = HTTP polling; or your own `wss://` |
+| `RPC_WS_URL` | publicnode websocket | detection by subscription; `off` = HTTP polling; comma-separated to race; never commit a provider key |
 | `POLL_MS` | 300 | HTTP detection interval when the websocket is off |
 | `RPC_IN_FLIGHT` | 3 | requests in flight through the gate |
 | `RPC_SPACING_MS` | 50 | minimum gap between request starts |
@@ -214,6 +218,15 @@ with `--live`, calls `claim()` and prints what arrived.
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | | alerts |
 | `BOARD_PORT` | 4663 | board |
 | `SNIPE_BUDGET_ETH` | 0.05 | ETH a session may spend on entries before it stops firing |
+| `SEQUENCER_URL` | official sequencer | write-only `eth_sendRawTransaction` |
+| `FEED_URL` | official feed | optional; `off` disables; always send the sequence-number header |
+| `HELPER_ADDRESS` | | `BodkinBuyOnce` after `helper deploy` |
+| `ENTRY_SECOND` | 2 | tax window entry |
+| `BURST_MAX` / `BURST_LEAD_MS` / `BURST_CONNS` | 8 / 150 / 12 | parallel pre-signed sends |
+| `EXIT_LADDER` | `34@100,33@300` | on-curve partials |
+| `STALE_SEC` / `STALE_MIN_PROGRESS` | 90 / 0.02 | on-curve stale exit |
+| `MIN_TAXED_BUYERS_S1` / `MAX_EXEMPT_BUYS_S0` | 0 / 32 | live gate |
+| `ABORT_IF_INSIDER_SOLD` | true | live gate |
 | `REF_AXIOM` | phosphen | Axiom handle for the sign-up link at startup and in the board footer; empty drops it |
 | `REF_FOMO` | phosphenq | FOMO code for the same sign-up link; empty drops it |
 | `NO_COLOR` | | plain output; `FORCE_COLOR=1` keeps colors when piping |
@@ -224,4 +237,5 @@ with `--live`, calls `claim()` and prints what arrived.
 |---|---|
 | `data/positions.json` | every position the engine opened, with marks and exits |
 | `data/launches.jsonl` | one line per launch `hunt` presented |
+| `data/outcomes.jsonl` | launch_seen / attempt / fire / mark / exit |
 | `.env` | your settings and, if you trade live, your key; git-ignored |

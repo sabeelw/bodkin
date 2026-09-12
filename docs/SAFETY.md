@@ -2,8 +2,8 @@
 
 ## Custody
 
-- The only secret is `PRIVATE_KEY` in your own `.env`. It is read by `src/trade/wallet.ts` and used to sign transactions sent to the RPC
-  you configured. It is never printed, logged, written to `data/`, or sent anywhere else.
+- The only secret is `PRIVATE_KEY` in your own `.env`. It is read by `trade/wallet.rs` and used to sign transactions sent to the sequencer
+  (or the fallback RPC). It is never printed, logged, written to `data/`, or sent anywhere else.
 - Use a fresh wallet with only what you are willing to lose in a session. Bodkin never asks for more than one buy at a time.
 - `.env` is git-ignored. `data/positions.json` contains token addresses and amounts, not keys.
 

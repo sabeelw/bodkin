@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <img alt="tests" src="https://img.shields.io/badge/tests-23%20passing-CCFF00?style=flat-square&labelColor=110E08">
-  <img alt="node" src="https://img.shields.io/badge/node-%E2%89%A520-D9D9D9?style=flat-square&labelColor=110E08">
-  <img alt="runtime deps" src="https://img.shields.io/badge/runtime%20deps-3-D9D9D9?style=flat-square&labelColor=110E08">
+  <img alt="tests" src="https://img.shields.io/badge/tests-28%20passing-CCFF00?style=flat-square&labelColor=110E08">
+  <img alt="rustc" src="https://img.shields.io/badge/rustc-%E2%89%A51.91-D9D9D9?style=flat-square&labelColor=110E08">
+  <img alt="runtime" src="https://img.shields.io/badge/runtime-one%20binary-D9D9D9?style=flat-square&labelColor=110E08">
   <img alt="chain" src="https://img.shields.io/badge/chain-4663-D9D9D9?style=flat-square&labelColor=110E08">
   <img alt="custody" src="https://img.shields.io/badge/custody-none-D9D9D9?style=flat-square&labelColor=110E08">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-FFE700?style=flat-square&labelColor=110E08">
@@ -18,15 +18,15 @@
   <b>$BODKIN</b> · <code>0xB06B1E58F5ba2a3df1AB74C01cB2A44C5395B3be</code>
 </p>
 
-Every pons v2 launch on Robinhood Chain opens behind a **99 % tax that decays to zero in three seconds**. Racing the first block
-hands the buy to the creator. The chain seals a block every 100 ms, orders by arrival, and has no gas auction, so the only edge
-left is *when*. Bodkin reads a launch in one call, scores it with rules you can read, waits at full draw until the tax is under
-your ceiling, and releases. Local, open, non-custodial, dry run by default.
+Every pons v2 launch on Robinhood Chain opens behind a **99 % tax that decays 9900 → 618 → 19 → 0 across three Unix seconds**.
+Racing the first block hands the buy to the creator. The chain seals a block every 100 ms, orders by arrival, and has no gas
+auction, so the only edge left is *when*. Bodkin reads a launch in one Multicall3, scores it with rules you can read, waits for
+the first block of second +2, and fires a burst of pre-signed `BuyOnce` txs at the sequencer. Local, open, non-custodial, dry run by default.
 
 | The problem | What bodkin does | Command |
 |---|---|---|
 | 24 000 launches a day, 559 graduate | one multicall per launch: dev buy, creator tax, who gets the fees, declared bundle, deployer record, launch-farm fingerprint, curve progress, then a 0–100 score with reasons | `hunt` · `board` |
-| the first second costs 99 % | polls `currentSnipeTaxBps` for **your** address every 150 ms and buys under the ceiling. Measured: 0.19 % tax at entry, every time | `snipe` |
+| the first second costs 99 % | clock-scheduled burst at second +2 (19 bps). Helper reverts if the tax is still high or you already bought | `snipe` |
 | "who is getting paid on this token?" | reads the fee escrow's own `Credited` / `Claimed` events: recipient, accrued, every claim with a timestamp | `fees` |
 | "has this deployer ever graduated anything?" | every launch by the address in the window, with its phase | `dev` |
 | following one launch by hand | curve fill, buyers, flow and the opening tax every five seconds, then the pool price | `watch` |
@@ -37,41 +37,31 @@ your ceiling, and releases. Local, open, non-custodial, dry run by default.
 
 ## Install
 
-Node 20 or newer. Three ways, all of them local.
+Rust (stable, rustc ≥ 1.91). One binary.
 
 ```sh
-# 1. a checkout you can read and edit
 git clone https://github.com/Phosphenq/bodkin && cd bodkin
-npm install
 cp .env.example .env
-npx bodkin doctor
-```
-
-```sh
-# 2. straight from GitHub, no clone
-npm install -g github:Phosphenq/bodkin
-bodkin doctor
-```
-
-```sh
-# 3. inside the checkout, without the bin
-npm run doctor   ·   npm run hunt   ·   npm run board
+cargo build --release
+./target/release/bodkin doctor
 ```
 
 On Windows the checkout carries three launchers: `start-hunt.cmd`, `start-snipe.cmd` (dry run) and `start-board.cmd`. Double-click one;
-it installs dependencies on the first run, copies `.env.example` to `.env` when there is none, and starts that command. With Windows
-Terminal set as the default terminal app the links in the output are clickable.
+it builds `bodkin.exe` on the first run, copies `.env.example` to `.env` when there is none, and starts that command.
 
-`.env` works out of the box on the public RPC. No key is needed for `doctor`, `hunt`, `watch`, `scan`, `fees`, `dev`, `positions`,
-or any dry run. `PRIVATE_KEY` is needed only for `--live`, `sell`, `wallet` and `claim`.
+`.env` works on the public RPC. No key is needed for `doctor`, `hunt`, `watch`, `scan`, `fees`, `dev`, `positions`, `outcomes`,
+`replay`, or any dry run. `PRIVATE_KEY` is needed only for `--live`, `sell`, `wallet`, `claim` and `helper deploy`.
 
 | | |
 |---|---|
-| **Required** | Node ≥ 20 |
-| **Runtime dependencies** | `viem`, `commander`, `ws` |
-| **For live trades** | `PRIVATE_KEY` in `.env` and ETH on Robinhood Chain (bridge at robinhood.com/chain) |
-| **Detection** | by subscription over publicnode's free websocket, out of the box; `RPC_WS_URL=off` for 300 ms polling, or your own `wss://` |
-| **Public RPCs** | two by default: publicnode for state reads (fast, no `eth_getLogs`) and the official Robinhood RPC for logs (rejects bursts with 429, counts calls inside a JSON-RPC batch, meters `eth_getLogs` separately, challenges noisy clients). Bodkin sends single requests through one gate (`RPC_IN_FLIGHT=3`, `RPC_SPACING_MS=50`, `RPC_LOGS_SPACING_MS=400`), routes each method to an endpoint that serves it, benches one that refuses, and waits instead of failing. `RPC_URL=` a private provider carries everything |
+| **Required** | rustc ≥ 1.91 (`rustup`) |
+| **Runtime** | one `bodkin` binary (alloy + tokio) |
+| **For live trades** | `PRIVATE_KEY` and `HELPER_ADDRESS` in `.env`, ETH on Robinhood Chain (bridge at robinhood.com/chain) |
+| **Detection** | raced websocket `TokenLaunched` (publicnode by default); `RPC_WS_URL=off` for 300 ms polling; optional `FEED_URL` |
+| **Sends** | direct `eth_sendRawTransaction` to `SEQUENCER_URL` (warm HTTP/1.1, IP pin + same-nonce spray). Alloy is not used for send |
+| **Public RPCs** | two by default: publicnode for state reads and the official Robinhood RPC for logs. One gate, no JSON-RPC batches. `RPC_URL=` a private provider carries everything |
+
+Co-locate later, not first: [docs/DEPLOY.md](./docs/DEPLOY.md).
 
 ## Sixty seconds
 
@@ -102,6 +92,9 @@ bodkin snipe --live       # after you have watched it for an hour
 | `positions` | open and closed positions with live marks | no |
 | `wallet` | the signer: address, balance, unclaimed fees | yes |
 | `claim` | claim your creator fees from the escrow | `--live` only |
+| `helper` | deploy / check `BodkinBuyOnce` | `--live` to broadcast |
+| `outcomes` | summary of `data/outcomes.jsonl` | no |
+| `replay` | sampled launches vs an alternate entry second | no |
 
 Every flag and environment variable: [docs/COMMANDS.md](./docs/COMMANDS.md).
 
@@ -114,7 +107,7 @@ One card per launch, a follow-up line at +15 s and +60 s. Every field is a chain
 - **dev buy** from the curve's `CurveBuy` events in the launch transaction, as a share of the 1 B supply
 - **creator tax** and **fee recipient** from the factory record; `third party` means the fees do not go to the deployer (the builder / KOL deal)
 - **exempt wallets**: addresses declared exempt from the opening tax in the launch calldata, which is the declared bundle
-- **deployer**: prior launches in ~11 h and how many graduated, from an index built once at startup
+- **deployer**: prior launches in ~2 days (~1.73M blocks) and how many graduated, from an index built once at startup
 - **fingerprint**: the same dev-buy wei, tax and links from other fresh wallets inside 30 minutes is a launch farm, and scores like one
 - **curve**: real quote in / graduation threshold, FDV in the pair asset (ETH, USDG, or a stock token), and the opening tax *right now*
 
@@ -146,7 +139,7 @@ hidden in the page: [docs/BOARD.md](./docs/BOARD.md).
 
 <p align="center"><img src="./assets/snipe.png" alt="bodkin snipe dry run: pass reasons, draw, and FIRE lines with the tax at entry and the wait in milliseconds" width="100%"></p>
 
-Detect → read → decide → wait at full draw → release → mark every 5 s → exit. Dry run unless `--live`.
+Detect → one Multicall3 → decide → live flow gate at the +2 boundary → burst `BuyOnce` → 1 s marks for the first minute → ladder / stale / insider, then SL/trail after graduation. Dry run unless `--live`.
 
 ```
 bodkin snipe                                 # dry run with the defaults from .env
@@ -160,7 +153,7 @@ bodkin snipe --live                          # sign and send
 Every `pass` prints the rule that refused the launch. A launch that declared four wallets exempt from the opening tax is refused by the
 defaults even when everything else about it looks good. Relax `maxExemptWallets` on purpose, or not.
 
-Exits: take profit +80 %, stop loss −35 %, trailing 25 % below the peak, max hold 45 min. Marks are real quotes for the whole position.
+On-curve exits: ladder (`EXIT_LADDER`, default 34 % at +100 %, 33 % at +300 %), stale curve, insider sell. After graduation: take profit +80 %, stop loss −35 %, trailing 25 % below the peak, max hold 45 min. Marks are real quotes for the whole position.
 Four walls around a live session: a confirmation that prints your address, balance and limits and waits for you to type `arm`; the size
 per buy; the position cap; and a **session budget** (`--budget`, 0.05 ETH by default) after which nothing fires, whatever the score.
 The rules, the score and where every number comes from: [docs/STRATEGY.md](./docs/STRATEGY.md); what can go wrong: [docs/SAFETY.md](./docs/SAFETY.md).
@@ -203,29 +196,24 @@ bodkin claim --live               # take the fees out of the escrow
 
 ```mermaid
 flowchart LR
-    F["factory<br/>TokenLaunched"] -->|"300 ms poll<br/>or websocket"| D[detect]
-    D --> E["enrich<br/>1 multicall + 3 tx reads"]
-    E --> S["score"]
-    S --> R{"rules"}
-    R -->|pass| P["logged with why"]
-    R -->|fire| W["wait: tax ≤ ceiling"]
-    W --> B["buy on curve"]
-    B --> M["mark / 5 s"]
-    M --> X["TP · SL · trail · hold · close now"]
-    X --> O["sell on curve or v4 pool"]
+    WS["raced WS TokenLaunched"] --> D[detect]
+    ST["CurveBuy / Sell / SnipeTax"] --> FT[FlowTracker]
+    D --> E["one Multicall3"]
+    E --> S["score + decide"]
+    S --> G["live gate at +2"]
+    FT --> G
+    CL["newHeads clock"] --> B
+    G --> B["burst BuyOnce"]
+    B --> P["1 s marks"]
+    P --> X["ladder / stale / insider"]
 ```
 
-- Detection is a websocket subscription to the factory's `TokenLaunched` log (publicnode, free), with a watchdog: if the socket says
-  nothing for 45 seconds the feed re-subscribes and polls block ranges alongside until the socket delivers again, so the feed never goes
-  silent for good. There is no mempool to watch: the sequencer broadcasts blocks it has already built.
-- Enrichment is one `aggregate3` through the canonical Multicall3 (`0xcA11…CA11`) plus the launch transaction, receipt and block, all through
-  one RPC gate that routes each method to a public endpoint that serves it and keeps both from answering 429.
-- Deployer records come from an in-memory index of every launch and graduation in the last 400 000 blocks, built once at startup.
-- Curve math is the protocol's own integer order (`PonsV2BondingCurve.buy/sell`), so `minTokensOut` is computed with the rounding the
-  contract uses.
-- After graduation the token trades in a Uniswap v4 pool keyed by the pair token and tick spacing the factory recorded for that launch.
-  Quotes come from `V4Quoter`; swaps go through the UniversalRouter `V4_SWAP` command, and the router's parameter layout is settled by
-  simulation before the first live swap.
+- Detection is a raced websocket subscription to `TokenLaunched`, with a watchdog that walks last-seen → head after 45 s of silence. Optional `FEED_URL` decodes `launchAndBuy` calldata and CREATE2-predicts token/curve. There is no mempool.
+- Enrichment is one Multicall3 including the curve's snapshotted tax params. Dev buy from `CurveBuy` in the launch tx; exemptions from calldata (declared length, zeros kept) with `SnipeTaxExempted` as fallback. Missing launch tx is a refuse.
+- Sends go to the sequencer over warm HTTP/1.1 (`TCP_NODELAY`, 15 s timeout). Pin the fastest of the three us-east-2 IPs; spray nonce 0 of the burst at the other two. `eth_sendRawTransactionSync` is confirmation-only after a fill. Conditional is a `doctor --probe`, not the fire path.
+- Deployer records come from an in-memory index of ~2 days of launches, built on the background lane.
+- Curve math is the protocol's integer order. `minTokensOut` is sized as if this buy is last in the entry block.
+- Graduation: reserved supply is 28.57 %, but the v4 pool gets **20.41 % + 4.2 ETH**; 8.16 % is permanently locked.
 
 More in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md), what can go wrong in [docs/SAFETY.md](./docs/SAFETY.md).
 
@@ -233,11 +221,11 @@ More in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md), what can go wrong in [do
 
 | | |
 |---|---|
-| opening tax | 9 900 bps at t=0, window 3 s (`snipeTaxStartBps`, `snipeTaxSeconds` on the factory) |
+| opening tax | `start >> floor(14 · elapsed / window)` on the curve snapshot. Live: 9900 / 618 / 19 / 0 at e=0/1/2/≥3 |
 | launch fee | 0.0005 ETH |
 | launches / graduations, 24 h | 24 462 / 559 (`TokenLaunched` / `PoolGraduated`, blocks 52 526 287–53 396 287) |
 | tempo | 56–152 launches per 3 000 blocks (~5 min) |
-| graduation | 4.2 ETH real quote against a 1.68 ETH phantom reserve; 28.57 % of supply reserved for the pool |
+| graduation | 4.2 ETH real quote against a 1.68 ETH phantom reserve; pool gets 20.41 % of supply + 4.2 ETH, 8.16 % locked |
 | dry-run entries | tax 0.19 %; 1.2–1.6 s after detection over the websocket, which sees the launch block about a second earlier than polling did (polling entries landed 188–203 ms after detection) |
 | dry-run entries, 2026-09-04 | two fires, both at tax 0.19 %; the launch card read in 279–284 ms; entry 1.6–2.1 s after detection |
 | public RPC | 8 parallel calls pass, 16 → half rejected, a batch of 12 → rejected; 2 calls every 100 ms → zero rejections |
@@ -245,13 +233,12 @@ More in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md), what can go wrong in [do
 ## Tests
 
 ```sh
-npm test
+cargo test
 ```
 
-Eighteen checks, no network: the curve quote reproduces the 3.00 % dev buy that 0.0535 ETH gives on a fresh curve, round trips lose
-more than the fee, the opening-tax cap, clamped fills, the score on a builder-shaped launch and on a serial deployer, the sniper's refusals,
-the launch-farm fingerprint, the unreadable-launch path, the enrichment limiter, the deployer index, v4 pool ids and both router param layouts,
-and every exit rule.
+No network. The curve quote reproduces the 3.00 % dev buy that 0.0535 ETH gives on a fresh curve, the live tax staircase, the score on a
+builder-shaped launch and on a serial deployer, the sniper's refusals, the launch-farm fingerprint, session budget, the unreadable-launch
+path, the limiter, the deployer index, burst classify, ladder / stale / insider, and v4 ETH-is-currency0.
 
 ## FAQ
 

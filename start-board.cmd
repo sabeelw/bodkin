@@ -1,7 +1,10 @@
 @echo off
-rem bodkin board: starts the engine in dry run and opens the page. Close this window to stop.
+rem bodkin board: the sniper behind http://127.0.0.1:4663. Dry run. Ctrl+C to stop.
 cd /d "%~dp0"
-if not exist node_modules (echo installing dependencies... && call npm install)
 if not exist .env copy .env.example .env >nul
-start "" http://127.0.0.1:4663
-npx tsx src/cli.ts board --min-score 55
+where cargo >nul 2>&1 || (echo install Rust from https://rustup.rs && pause && exit /b 1)
+if not exist target\release\bodkin.exe (
+  echo building bodkin...
+  cargo build --release || (pause && exit /b 1)
+)
+target\release\bodkin.exe board

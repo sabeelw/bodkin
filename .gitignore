@@ -1,3 +1,4 @@
+target/
 node_modules/
 dist/
 .env
@@ -7,3 +8,9 @@ data/
 assets/*.txt
 assets/ref/
 .claude/
+out/
+cache/
+broadcast/
+contracts/lib/
+contracts/out/
+contracts/cache/

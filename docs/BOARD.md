@@ -1,7 +1,7 @@
 # The board
 
-`bodkin board` runs the sniper engine and serves one page on `http://127.0.0.1:4663`. It binds loopback only; nothing outside your machine can
-reach it. Dry run unless you started it with `--live`.
+`bodkin board` runs the sniper engine (axum) and serves `web/board.html` on `http://127.0.0.1:4663`. It binds loopback only; nothing outside
+your machine can reach it. Dry run unless you started it with `--live`.
 
 **It opens as a feed.** Launches arrive, get scored and explained, and nothing fires until you press **start demo** (dry-run buys, no key
 needed) or, with `--live`, **arm live sniping** (confirmed once in the terminal at start and once more on the button). **stop** returns to

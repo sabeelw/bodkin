@@ -5,12 +5,19 @@ the defaults are a starting point, not advice.
 
 ## The opening tax is the whole game
 
-`snipeTaxStartBps() = 9900`, `snipeTaxSeconds() = 3` on the live factory. A buy in the first ~200 ms hands 97 % of the spend
-to the creator's fee bucket (the curve caps the tax so the buyer keeps at least 1 %). At one second it is roughly a quarter,
-at two seconds a few percent, at three it is gone. The chain seals a block every ~100 ms and orders transactions by arrival,
-so there is no gas auction to win. Bodkin reads `currentSnipeTaxBps(yourAddress)` every 150 ms and releases under the ceiling.
+Each curve snapshots `snipeTaxStartBps` / `snipeTaxSeconds` in `initialize` (factory params are owner-mutable, max 60 s).
 
-Default ceiling `SNIPE_MAX_TAX_BPS=300` (3 %). Measured dry-run entries: tax 0–0.19 %, 188–203 ms after detection.
+```
+tax = startBps >> floor(14 · elapsed / window)
+elapsed = block.timestamp − launchedAt
+```
+
+Live snapshot: start 9900, window 3 → **9900 / 618 / 19 / 0** at e = 0 / 1 / 2 / ≥3 (~10 blocks share a Unix second). The tax is taken
+off ETH-in before pricing; `fee + snipeTax` goes to the base-fee bucket. Exempt: deployer, fee recipient, router-buy recipient, plus ≤32
+declared. No max buy, cooldown, or launch-block lock.
+
+Default ceiling `SNIPE_MAX_TAX_BPS=300`. Any ceiling in [19, 617] is the same rule: enter in the **first block of second +2**.
++1 is 6.18 % and crowded. +3 only saves 19 bps and loses if 0.1 ETH already arrived at +2. Some wallets buy 0.0025 ETH at +1 and sell at +3.
 
 ## What the score rewards and punishes
 
@@ -22,7 +29,8 @@ Default ceiling `SNIPE_MAX_TAX_BPS=300` (3 %). Measured dry-run entries: tax 0�
 | creator tax ≤ 2 % | +10 | the creator earns on volume and has a reason to keep posting |
 | creator tax > 5 % | −25 | traders pay 6 %+ per side; flow dies |
 | fees routed to a third party | +5 and a flag | the builder/KOL deal pattern: the wallet that launched is not the wallet that gets paid |
-| X link / website / telegram | +8 / +8 / +3 | a launch with nowhere to go has no one to bring flow |
+| X link / website / telegram | +8 / +8 / +8 | telegram scores the same as a website; do not also hard-refuse socials twice |
+| fee recipient is a contract | −8 | cached `eth_getCode`; only when looked up |
 | no socials | −15 | |
 | exempt wallets 1–3 / 4+ | −5 / −20 | addresses declared exempt from the opening tax at launch are the declared bundle |
 | fresh deployer | +5 | |
@@ -50,6 +58,10 @@ Verdicts: FIRE ≥ 75, WATCH ≥ 45, SKIP below.
 | max open positions | 3 | `--max-open` |
 | launch-farm twins | ≤ 1 | `maxFarmTwins` in `rulesFromEnv` |
 | ETH per shot | `SNIPE_ETH` = 0.01 | `--eth` |
+| entry second | 2 | `ENTRY_SECOND` |
+| taxed buyers in second 1 | 0 (off) | `MIN_TAXED_BUYERS_S1` |
+| exempt buys in second 0 | 32 | `MAX_EXEMPT_BUYS_S0` |
+| abort if insider sold | yes | `ABORT_IF_INSIDER_SOLD` |
 
 Five of these (min score, max open, tax ceiling, dev share, exempt wallets) can be changed while the engine runs, from the board.
 
@@ -58,21 +70,27 @@ That is the point of showing reasons: you decide which rule to relax, on purpose
 
 ## Exits
 
+On the curve, stop-loss is replaced by **stale** and **insider sell**. Ladder takes partials. SL / trail / max-hold still fire after graduation.
+
 | Rule | Default | Env |
 |---|---|---|
-| take profit | +80 % | `TAKE_PROFIT_PCT` |
-| stop loss | −35 % | `STOP_LOSS_PCT` |
-| trailing stop | 25 % below the peak | `TRAILING_PCT` |
-| max hold | 45 min | `MAX_HOLD_MIN` |
+| ladder | 34 % at +100 %, 33 % at +300 % | `EXIT_LADDER` |
+| stale | <2 % progress after 90 s | `STALE_SEC`, `STALE_MIN_PROGRESS` |
+| insider sold | full exit | `ABORT_IF_INSIDER_SOLD` (gate) / FlowTracker |
+| take profit (post-grad) | +80 % | `TAKE_PROFIT_PCT` |
+| stop loss (post-grad) | −35 % | `STOP_LOSS_PCT` |
+| trailing stop (post-grad) | 25 % below the peak | `TRAILING_PCT` |
+| max hold (post-grad) | 45 min | `MAX_HOLD_MIN` |
 
 Marks come from a real quote (curve `quoteSell` or `V4Quoter`), so a mark already includes the 1 % fee, the creator tax and
 price impact of selling the whole position. A fresh 0.01 ETH entry marks around −10 % immediately; that is the round trip, not a loss yet.
 
 ## Graduation
 
-The curve closes when 4.2 ETH of real quote is in (config 0). The factory sweeps it and creates a full-range, permanently locked
-Uniswap v4 position. Between sweep and pool there is a gap of seconds to minutes when nothing can trade; `sellAnywhere` refuses
-during that gap instead of guessing. On 2026-09-02/03: 24 462 launches, 559 graduations, so about one launch in forty-four graduates.
+The curve closes when 4.2 ETH of real quote is in (config 0). Reserved supply is 28.57 %, but the graduated Uniswap v4 pool gets
+**20.41 % + 4.2 ETH**; 8.16 % is permanently locked. Spot at graduation is about 12.25× launch. Between sweep and pool there is a gap
+when nothing can trade; `sell_anywhere` refuses during that gap. On 2026-09-02/03: 24 462 launches, 559 graduations, so about one
+launch in forty-four graduates.
 
 ## Known blind spots
 

@@ -1,6 +1,10 @@
 @echo off
-rem bodkin hunt: the live launch feed in this window. Ctrl+C or close the window to stop.
+rem bodkin hunt: live feed of pons v2 launches. Ctrl+C or close the window to stop.
 cd /d "%~dp0"
-if not exist node_modules (echo installing dependencies... && call npm install)
 if not exist .env copy .env.example .env >nul
-npx tsx src/cli.ts hunt
+where cargo >nul 2>&1 || (echo install Rust from https://rustup.rs && pause && exit /b 1)
+if not exist target\release\bodkin.exe (
+  echo building bodkin...
+  cargo build --release || (pause && exit /b 1)
+)
+target\release\bodkin.exe hunt
