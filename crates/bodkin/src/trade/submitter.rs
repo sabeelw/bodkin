@@ -65,6 +65,7 @@ impl Submitter {
             .await?
             .collect::<Vec<_>>();
         let mut endpoints = Vec::new();
+        let mut failures = Vec::new();
         for address in addrs {
             let ip = match address {
                 SocketAddr::V4(value) => value.ip().to_string(),
@@ -77,13 +78,19 @@ impl Submitter {
                 continue;
             }
             let client = client_pinned(&self.host, &ip)?;
-            if let Ok(rtt_ms) = warmup_rtt(&client, &self.url, &self.host, &ip).await {
-                endpoints.push(PinnedSequencer {
+            match warmup_rtt(&client, &self.url, &self.host, &ip).await {
+                Ok(rtt_ms) => endpoints.push(PinnedSequencer {
                     stat: SequencerIp { ip, rtt_ms },
                     client,
-                });
+                }),
+                Err(error) => failures.push(format!("{ip}: {error}")),
             }
         }
+        anyhow::ensure!(
+            !endpoints.is_empty(),
+            "no sequencer address completed a pinned HTTP warm-up: {}",
+            failures.join("; ")
+        );
         endpoints.sort_by_key(|endpoint| endpoint.stat.rtt_ms);
         let stats = endpoints
             .iter()
@@ -296,8 +303,9 @@ async fn warmup_rtt(
     );
     let value: Value = response.json().await?;
     anyhow::ensure!(
-        value.get("error").is_none() && value.get("result").is_some(),
-        "sequencer {ip}: invalid chainId response"
+        value.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+            && (value.get("error").is_some() || value.get("result").is_some()),
+        "sequencer {ip}: invalid JSON-RPC response"
     );
     Ok(t0.elapsed().as_millis() as u64)
 }

@@ -485,7 +485,7 @@ pub async fn curve_activity(
     from_block: u64,
     to_block: Option<u64>,
 ) -> anyhow::Result<CurveActivity> {
-    use crate::abi::{TOPIC_SNIPE_TAX_CHARGED, curve as cabi};
+    use crate::abi::curve as cabi;
     use alloy::rpc::types::Filter;
     use alloy::sol_types::SolEvent;
     let to = match to_block {
@@ -512,7 +512,7 @@ pub async fn curve_activity(
             out.sells += 1;
             out.quote_out += s.quoteOut;
         }
-        if l.topics().first().copied() == Some(TOPIC_SNIPE_TAX_CHARGED) {
+        if l.topics().first().copied() == Some(cabi::SnipeTaxCharged::SIGNATURE_HASH) {
             out.taxed_buys += 1;
         }
     }

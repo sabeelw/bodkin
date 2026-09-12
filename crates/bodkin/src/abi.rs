@@ -1,7 +1,7 @@
 //! pons v2 + Uniswap v4 ABIs. Sources: live factory / verified Blockscout + contractsV2 repo.
 #![allow(non_snake_case, clippy::all)]
 
-use alloy::primitives::{B256, b256};
+use alloy::primitives::B256;
 use alloy::sol;
 
 sol! {
@@ -72,7 +72,8 @@ sol! {
         event CurveBuy(address indexed buyer, address indexed recipient, uint256 quoteIn, uint256 tokensOut, uint256 fee, uint256 tax);
         event CurveSell(address indexed seller, address indexed recipient, uint256 tokensIn, uint256 quoteOut, uint256 fee, uint256 tax);
         event CurveBuyRefunded(address indexed recipient, uint256 refundAmount);
-        event CurveCompleted();
+        event SnipeTaxCharged(address indexed recipient, uint256 amount);
+        event CurveCompleted(address recipient, uint256 quoteOut, uint256 tokenOut);
     }
 
     contract token {
@@ -179,10 +180,6 @@ sol! {
         function allowance(address user, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce);
     }
 }
-
-/// Verified live opening-tax topic; its unindexed data is `(uint256 taxBps, uint256 taxPaid)`.
-pub const TOPIC_SNIPE_TAX_CHARGED: B256 =
-    b256!("0x3bc39a5562b28f5fe8f36cecabfbaa12bb969acf05717994709225fc412a9934");
 
 pub const PHASE_NAME: [&str; 4] = ["curve", "swept", "pool", "rescued"];
 

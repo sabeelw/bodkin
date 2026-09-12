@@ -1,8 +1,8 @@
-use crate::abi::{TOPIC_SNIPE_TAX_CHARGED, curve, topics};
+use crate::abi::{curve, topics};
 use crate::rpc::{Lane, Rpc};
 use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::{Filter, Log};
-use alloy::sol_types::{SolEvent, SolValue};
+use alloy::sol_types::SolEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -50,8 +50,8 @@ pub enum FlowEvent {
     },
     Tax {
         transaction_hash: B256,
-        tax_bps: U256,
-        tax_paid: U256,
+        recipient: Address,
+        amount: U256,
         timestamp: u64,
     },
     Completed {
@@ -228,12 +228,12 @@ impl FlowTracker {
                 tax: sell.tax,
                 timestamp: block_ts,
             }
-        } else if topic == TOPIC_SNIPE_TAX_CHARGED {
-            let (tax_bps, tax_paid) = <(U256, U256)>::abi_decode(log.data().data.as_ref())?;
+        } else if topic == curve::SnipeTaxCharged::SIGNATURE_HASH {
+            let tax = curve::SnipeTaxCharged::decode_log(&log.clone().into())?;
             FlowEvent::Tax {
                 transaction_hash,
-                tax_bps,
-                tax_paid,
+                recipient: tax.recipient,
+                amount: tax.amount,
                 timestamp: block_ts,
             }
         } else if topic == curve::CurveCompleted::SIGNATURE_HASH {
@@ -357,7 +357,7 @@ pub async fn fetch_curve_logs_on(
         .await?;
     let mut ts_cache: HashMap<u64, u64> = HashMap::new();
     for log in &logs {
-        if log.block_timestamp.is_none() {
+        if log.block_timestamp.unwrap_or(0) == 0 {
             let block = log.block_number.ok_or_else(|| {
                 anyhow::anyhow!("curve log is missing both block timestamp and block number")
             })?;
@@ -370,10 +370,12 @@ pub async fn fetch_curve_logs_on(
         .map(|log| {
             let timestamp = log
                 .block_timestamp
+                .filter(|timestamp| *timestamp > 0)
                 .or_else(|| {
                     log.block_number
                         .and_then(|block| ts_cache.get(&block).copied())
                 })
+                .filter(|timestamp| *timestamp > 0)
                 .ok_or_else(|| anyhow::anyhow!("curve log timestamp unavailable"))?;
             Ok((log, timestamp))
         })
@@ -432,17 +434,21 @@ mod tests {
         )
     }
 
-    fn tax_log(curve: Address, buyer: Address, recipient: Address, tx: B256, ix: u64) -> Log {
-        let data = (U256::from(100), U256::from(1)).abi_encode();
-        mk_log(
-            curve,
-            TOPIC_SNIPE_TAX_CHARGED,
-            buyer,
-            recipient,
-            data,
-            tx,
-            ix,
-        )
+    fn tax_log(curve: Address, recipient: Address, amount: U256, tx: B256, ix: u64) -> Log {
+        let event = curve::SnipeTaxCharged { recipient, amount };
+        Log {
+            inner: alloy::primitives::Log {
+                address: curve,
+                data: event.encode_log_data(),
+            },
+            block_hash: Some(B256::from([1u8; 32])),
+            block_number: Some(1),
+            block_timestamp: None,
+            transaction_hash: Some(tx),
+            transaction_index: Some(0),
+            log_index: Some(ix),
+            removed: false,
+        }
     }
 
     fn sell_log(
@@ -471,13 +477,26 @@ mod tests {
 
     #[test]
     fn tax_after_buy_still_counts() {
+        assert_eq!(
+            curve::SnipeTaxCharged::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "0x3bc39a5562b28f5fe8f36cecabfbaa12bb969acf05717994709225fc412a9934"
+            )
+        );
+        assert_eq!(
+            curve::CurveCompleted::SIGNATURE_HASH,
+            alloy::primitives::b256!(
+                "0xf8d37a90738ae063b8b8058b66f5880cf3cf7ab0c5d4fa78219696591dfbfb67"
+            )
+        );
         let curve = a(9);
         let mut f = FlowTracker::default();
         f.watch(curve, 1_000, 1, vec![a(99)]);
         let tx = B256::from(U256::from(42));
         // SnipeTaxCharged delivered BEFORE the CurveBuy of the same tx — the
         // association must resolve at snapshot time regardless of order.
-        f.ingest(&tax_log(curve, a(1), a(1), tx, 0), 1_001).unwrap();
+        f.ingest(&tax_log(curve, a(1), U256::from(1), tx, 0), 1_001)
+            .unwrap();
         f.ingest(&buy_log(curve, a(1), a(1), U256::from(10), tx, 1), 1_001)
             .unwrap();
         let s = f.snapshot(curve);

@@ -809,6 +809,8 @@ mod tests {
         }
         assert!(saw_resync);
 
+        let now = now_ms();
+        state.engine.clock().note_header(now / 1_000, now, 1, 2);
         for _ in 0..2 {
             let response = app
                 .clone()

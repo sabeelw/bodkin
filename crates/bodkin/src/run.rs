@@ -225,6 +225,17 @@ pub async fn start_engine(
     })
 }
 
+struct BusyGuard {
+    token: Address,
+    busy: Arc<Mutex<HashSet<Address>>>,
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.busy.lock().remove(&self.token);
+    }
+}
+
 struct CloseGuard {
     id: String,
     closing: Arc<Mutex<HashSet<String>>>,
@@ -1085,6 +1096,10 @@ async fn handle_launch(
     if !busy.lock().insert(ev.token) {
         return;
     }
+    let _busy_guard = BusyGuard {
+        token: ev.token,
+        busy: busy.clone(),
+    };
     let t0 = now_ms();
     index.lock().await.note(&ev);
     let intel = limiter
@@ -1285,6 +1300,28 @@ async fn handle_launch(
             busy.lock().remove(&ev.token);
             return;
         }
+        let observed_tax = match u64::try_from(fresh.opening_tax_bps) {
+            Ok(value) => value,
+            Err(_) => {
+                emit(
+                    serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["observed opening tax does not fit u64"]}),
+                );
+                busy.lock().remove(&ev.token);
+                return;
+            }
+        };
+        let observed_second = fresh.read_chain_ts.saturating_sub(launched_at);
+        if observed_tax > rules_now.max_opening_tax_bps {
+            emit(
+                serde_json::json!({"kind":"entry","token":format!("{:#x}",ev.token),"status":"simulated_revert","message":format!("helper ceiling would reject {} bps", observed_tax)}),
+            );
+            outcomes.write(
+                OutcomeKind::Attempt,
+                serde_json::json!({"token":format!("{:#x}",ev.token),"simulated":true,"confirmed":false,"configured_entry_second":rules_now.entry_second,"observed_entry_second":observed_second,"tax":observed_tax,"reason":"helper tax ceiling"}),
+            );
+            busy.lock().remove(&ev.token);
+            return;
+        }
         let q = crate::pons::curve::quote_buy(&fresh, rules_now.eth_per_buy);
         if q.tokens_out.is_zero() {
             emit(
@@ -1293,7 +1330,7 @@ async fn handle_launch(
             busy.lock().remove(&ev.token);
             return;
         }
-        let tax: u64 = fresh.opening_tax_bps.try_into().unwrap_or(tax);
+        let tax = observed_tax;
         let sh = shadow_result(launched_at, rules_now.entry_second);
         let pos = positions.open_position(
             ev.token,
@@ -1325,19 +1362,20 @@ async fn handle_launch(
             );
         }
         info(format!(
-            "{}  {} would buy {} ETH at tax {}  {}",
+            "{}  {} would buy {} ETH at tax {} (observed +{})  {}",
             muted(crate::fmt::hhmmss(None)),
             on_neon(" FIRE "),
             crate::fmt::eth(q.spent),
             crate::fmt::bps(tax),
+            observed_second,
             muted(&sh.message)
         ));
         emit(
-            serde_json::json!({"kind":"fire","token":format!("{:#x}",ev.token),"taxBps":tax,"waitedMs":now_ms()-t0,"live":false,"simulated":true,"positionId":pos.id,"ethIn":q.spent.to_string(),"tokens":q.tokens_out.to_string(),"symbol":pos.symbol}),
+            serde_json::json!({"kind":"fire","token":format!("{:#x}",ev.token),"taxBps":tax,"configuredEntrySecond":rules_now.entry_second,"observedEntrySecond":observed_second,"waitedMs":now_ms()-t0,"live":false,"simulated":true,"positionId":pos.id,"ethIn":q.spent.to_string(),"tokens":q.tokens_out.to_string(),"symbol":pos.symbol}),
         );
         outcomes.write(
             OutcomeKind::Fire,
-            serde_json::json!({"token": format!("{:#x}", ev.token), "tax": tax, "simulated": true}),
+            serde_json::json!({"token": format!("{:#x}", ev.token), "tax": tax, "simulated": true,"configured_entry_second":rules_now.entry_second,"observed_entry_second":observed_second,"eth_in":q.spent.to_string(),"tokens":q.tokens_out.to_string()}),
         );
         return;
     }

@@ -187,10 +187,10 @@ fn state_before(launch: &ReplayLaunch, entry_second: u64) -> Option<CurveState> 
         .filter_map(|record| match &record.event {
             FlowEvent::Tax {
                 transaction_hash,
-                tax_paid,
+                amount,
                 timestamp,
                 ..
-            } if *timestamp < target => Some((*transaction_hash, *tax_paid)),
+            } if *timestamp < target => Some((*transaction_hash, *amount)),
             _ => None,
         })
         .collect::<HashMap<_, _>>();

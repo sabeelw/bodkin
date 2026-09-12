@@ -36,7 +36,8 @@ elapsed = block.timestamp - launchedAt
 
 Live snapshot: start **9900**, window **3** → **9900 / 618 / 19 / 0** at elapsed 0 / 1 / 2 / ≥3.
 
-- Tax comes off ETH-in **before** pricing. `fee + snipeTax` goes to the base-fee bucket.
+- Tax comes off ETH-in **before** pricing. `fee + snipeTax` goes to the base-fee bucket. The live event is `SnipeTaxCharged(address indexed recipient, uint256 amount)`—one indexed address and one data word.
+- Some `eth_getLogs` responses include `blockTimestamp: 0x0`; zero is unavailable, not genesis time. Resolve that log's canonical block timestamp before second-based flow classification.
 - Exempt: deployer, fee recipient, router-buy recipient, plus ≤32 declared. Event `SnipeTaxExempted` exists on the deployed curve.
 - No max buy, cooldown, or launch-block lock.
 - Default ceiling `SNIPE_MAX_TAX_BPS=300`. Any ceiling in **[19, 617] ≡ enter first block of second +2**.
@@ -107,7 +108,7 @@ Marks are a real sell quote for the **whole** position (curve `quoteSell` or `V4
 - Sync timeout is a **`0x`-hex quantity** (e.g. `0x1f4`), not a JSON integer. Sync is confirmation **after** a fill, not the fire path.
 - Conditional `blockNumberMin/Max` are **L1**. `timestampMin` is L2 Unix seconds. Default TxPreChecker compares to the **last sealed** header, so `timestampMin = launchedAt+2` is late by one ~100 ms block. Conditional is reject-not-wait. Park on it only if `doctor --probe` shows immediate `-32003`.
 - Helper reverts **pay gas** (Nitro `max-revert-gas-reject` default 0). Clock lead stays tight.
-- Build and warm one persistent `ClientBuilder::resolve` client per sequencer IP so SNI/`Host` stay official. Spray **nonce 0** across the pinned set, reuse those clients for later attempts, and re-resolve every 5 minutes.
+- Build and warm one persistent `ClientBuilder::resolve` client per sequencer IP so SNI/`Host` stay official. The sequencer is write-only, so a well-formed JSON-RPC error to the harmless `eth_chainId` warm-up still proves the pinned HTTP path. Spray **nonce 0** across the pinned set, reuse those clients for later attempts, and re-resolve every 5 minutes.
 - Pre-sign `BURST_MAX` consecutive nonces. Fire in parallel. Default lead 150 ms. Receipt hash/status/block hash/logs/gas fields are strict; the canonical block hash is checked immediately, for 64 blocks on startup, and every ten seconds while live.
 
 ## Feed
