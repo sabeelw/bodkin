@@ -44,7 +44,7 @@ Live snapshot: start **9900**, window **3** → **9900 / 618 / 19 / 0** at elaps
 - +1 is 6.18% and crowded. +3 only saves 19 bps and loses if size already arrived at +2.
 - Some wallets buy ~0.0025 ETH at +1 and sell at +3. That is not our entry.
 
-`ENTRY_SECOND` default is **2**. Clock-scheduled burst; do not poll `currentSnipeTaxBps` every 150 ms as the old Node loop did.
+`ENTRY_SECOND` default is **2**. Clock-scheduled burst; do not poll `currentSnipeTaxBps` every 150 ms as the old Node loop did. Dry entries require a canonical reserve snapshot from +1 or +2 and model the immutable +2 tax; a later snapshot is an unfilled attempt, not a paper position.
 
 ## Graduation
 

@@ -9,8 +9,7 @@
 
 ## Dry run is the default
 
-`snipe`, `buy`, `sell`, `claim` and `board` quote and log without sending unless you pass `--live`. A dry run reads the same chain state
-and prints the same decision, so you can watch the engine for an hour before it is allowed to spend anything. The board goes one step
+`snipe`, `buy`, `sell`, `claim` and `board` quote and log without sending unless you pass `--live`. Dry `snipe` accepts a paper entry only when it captured canonical curve state during second +1 or +2, then applies the configured +2 tax. Marks and exits use the live chain without injecting the hypothetical buy's reserve impact, so dry PnL is useful for rejecting a strategy but cannot prove exact live profitability. The board goes one step
 further: even in dry run it opens as a feed and fires nothing until you press start.
 
 ## Four walls around a live session

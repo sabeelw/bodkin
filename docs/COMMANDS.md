@@ -5,7 +5,7 @@ From a source checkout: `cargo run --release -- <command>` or `./target/release/
 `start-hunt.cmd`, `start-snipe.cmd` and `start-board.cmd` build `bodkin.exe` then start those three.
 
 Commands that can move money (`snipe`, `buy`, `sell`, `claim`, `board --live`) are **dry run unless you pass `--live`**.
-A dry run reads the same chain state and prints the same decision; it just does not sign.
+Dry `snipe` requires a canonical curve snapshot from second +1 or +2, models the configured +2 tax, and refuses a paper fill when that timing window was missed. It does not sign. Subsequent marks use live chain quotes, which do not include the reserve impact of the hypothetical buy, so paper PnL is a screening metric rather than execution-identical PnL.
 
 | Command | What it does | Needs a key |
 |---|---|---|

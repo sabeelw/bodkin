@@ -1272,9 +1272,58 @@ async fn handle_launch(
         return;
     }
     let tax = snipe_tax_bps(start_bps, window, rules_now.entry_second);
+    if tax > rules_now.max_opening_tax_bps {
+        emit(
+            serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":[format!("scheduled opening tax {tax} bps exceeds ceiling {}",rules_now.max_opening_tax_bps)]}),
+        );
+        busy.lock().remove(&ev.token);
+        return;
+    }
     if !live {
-        // Dry entries wait for the real +2 boundary like live ones — the
-        // recorded open time is the moment a live burst would have fired.
+        let mut snapshot = match crate::trade::curve::read_curve_state(&rpc, ev.curve, recipient)
+            .await
+        {
+            Ok(state) => state,
+            Err(error) => {
+                emit(
+                    serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":[format!("curve snapshot before entry: {}", crate::fmt::first_line(&error.to_string()))]}),
+                );
+                busy.lock().remove(&ev.token);
+                return;
+            }
+        };
+        let snapshot_second = snapshot.read_chain_ts.saturating_sub(launched_at);
+        let earliest_snapshot = rules_now.entry_second.saturating_sub(1);
+        if snapshot.read_chain_ts == 0
+            || snapshot_second < earliest_snapshot
+            || snapshot_second > rules_now.entry_second
+        {
+            outcomes.write(
+                OutcomeKind::Attempt,
+                serde_json::json!({"token":format!("{:#x}",ev.token),"simulated":true,"confirmed":false,"configured_entry_second":rules_now.entry_second,"snapshot_second":snapshot_second,"tax":tax,"reason":"entry snapshot missed timing window"}),
+            );
+            emit(
+                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":[format!("dry entry snapshot arrived at +{snapshot_second}; need +{earliest_snapshot}..+{}", rules_now.entry_second)]}),
+            );
+            busy.lock().remove(&ev.token);
+            return;
+        }
+        if snapshot.graduated || snapshot.ready_to_graduate {
+            emit(
+                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["curve closed or graduated before entry"]}),
+            );
+            busy.lock().remove(&ev.token);
+            return;
+        }
+        snapshot.opening_tax_bps = U256::from(tax);
+        let q = crate::pons::curve::quote_buy(&snapshot, rules_now.eth_per_buy);
+        if q.tokens_out.is_zero() {
+            emit(
+                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["simulated +2 entry buys zero tokens"]}),
+            );
+            busy.lock().remove(&ev.token);
+            return;
+        }
         clock.sleep_until_unix(boundary).await;
         if paused.load(Ordering::SeqCst) || clock.require_quality(2_000, 1_500).is_err() {
             emit(
@@ -1283,54 +1332,6 @@ async fn handle_launch(
             busy.lock().remove(&ev.token);
             return;
         }
-        let fresh = match crate::trade::curve::read_curve_state(&rpc, ev.curve, recipient).await {
-            Ok(s) => s,
-            Err(e) => {
-                emit(
-                    serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":[format!("curve re-read before entry: {}", crate::fmt::first_line(&e.to_string()))]}),
-                );
-                busy.lock().remove(&ev.token);
-                return;
-            }
-        };
-        if fresh.graduated || fresh.ready_to_graduate {
-            emit(
-                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["curve closed or graduated before entry"]}),
-            );
-            busy.lock().remove(&ev.token);
-            return;
-        }
-        let observed_tax = match u64::try_from(fresh.opening_tax_bps) {
-            Ok(value) => value,
-            Err(_) => {
-                emit(
-                    serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["observed opening tax does not fit u64"]}),
-                );
-                busy.lock().remove(&ev.token);
-                return;
-            }
-        };
-        let observed_second = fresh.read_chain_ts.saturating_sub(launched_at);
-        if observed_tax > rules_now.max_opening_tax_bps {
-            emit(
-                serde_json::json!({"kind":"entry","token":format!("{:#x}",ev.token),"status":"simulated_revert","message":format!("helper ceiling would reject {} bps", observed_tax)}),
-            );
-            outcomes.write(
-                OutcomeKind::Attempt,
-                serde_json::json!({"token":format!("{:#x}",ev.token),"simulated":true,"confirmed":false,"configured_entry_second":rules_now.entry_second,"observed_entry_second":observed_second,"tax":observed_tax,"reason":"helper tax ceiling"}),
-            );
-            busy.lock().remove(&ev.token);
-            return;
-        }
-        let q = crate::pons::curve::quote_buy(&fresh, rules_now.eth_per_buy);
-        if q.tokens_out.is_zero() {
-            emit(
-                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["simulated entry buys zero tokens at current tax"]}),
-            );
-            busy.lock().remove(&ev.token);
-            return;
-        }
-        let tax = observed_tax;
         let sh = shadow_result(launched_at, rules_now.entry_second);
         let pos = positions.open_position(
             ev.token,
@@ -1362,20 +1363,20 @@ async fn handle_launch(
             );
         }
         info(format!(
-            "{}  {} would buy {} ETH at tax {} (observed +{})  {}",
+            "{}  {} would buy {} ETH at modeled tax {} (snapshot +{})  {}",
             muted(crate::fmt::hhmmss(None)),
             on_neon(" FIRE "),
             crate::fmt::eth(q.spent),
             crate::fmt::bps(tax),
-            observed_second,
+            snapshot_second,
             muted(&sh.message)
         ));
         emit(
-            serde_json::json!({"kind":"fire","token":format!("{:#x}",ev.token),"taxBps":tax,"configuredEntrySecond":rules_now.entry_second,"observedEntrySecond":observed_second,"waitedMs":now_ms()-t0,"live":false,"simulated":true,"positionId":pos.id,"ethIn":q.spent.to_string(),"tokens":q.tokens_out.to_string(),"symbol":pos.symbol}),
+            serde_json::json!({"kind":"fire","token":format!("{:#x}",ev.token),"taxBps":tax,"configuredEntrySecond":rules_now.entry_second,"snapshotSecond":snapshot_second,"waitedMs":now_ms()-t0,"live":false,"simulated":true,"positionId":pos.id,"ethIn":q.spent.to_string(),"tokens":q.tokens_out.to_string(),"symbol":pos.symbol}),
         );
         outcomes.write(
             OutcomeKind::Fire,
-            serde_json::json!({"token": format!("{:#x}", ev.token), "tax": tax, "simulated": true,"configured_entry_second":rules_now.entry_second,"observed_entry_second":observed_second,"eth_in":q.spent.to_string(),"tokens":q.tokens_out.to_string()}),
+            serde_json::json!({"token": format!("{:#x}", ev.token), "tax": tax, "simulated": true,"configured_entry_second":rules_now.entry_second,"snapshot_second":snapshot_second,"eth_in":q.spent.to_string(),"tokens":q.tokens_out.to_string()}),
         );
         return;
     }
