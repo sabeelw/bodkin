@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'><rect x='0.5' y='0.5' width='255' height='255' rx='48' fill='%23000' stroke='%2335322D'/><polygon points='128,30 158,138 128,120 98,138' fill='%23CCFF00'/><rect x='118' y='132' width='20' height='18' fill='%23CCFF00'/><rect x='123' y='150' width='10' height='66' fill='%23CCFF00'/><polygon points='123,216 123,232 105,224' fill='%23CCFF00'/><polygon points='133,216 133,232 151,224' fill='%23CCFF00'/></svg>">
 <style>
   :root {
     --bg: #000; --panel: #110E08; --chip: #23231F; --line: #35322D; --line-2: #4A463F;
@@ -91,6 +92,7 @@
   .tag.pass { color: var(--muted); }
   .tag.dry { border: 1px solid var(--line-2); background: transparent; color: var(--muted); }
   .tag.open { border: 1px solid var(--neon); background: transparent; color: var(--neon); }
+  .tag.hold { border: 1px solid var(--yellow); background: transparent; color: var(--yellow); }
   .score { display: inline-flex; align-items: center; gap: 6px; }
   .score i { display: inline-block; width: 44px; height: 4px; border-radius: 4px; background: var(--chip); overflow: hidden; }
   .score i b { display: block; height: 100%; width: 100%; background: var(--muted); transform-origin: left; transform: scaleX(0); transition: transform .6s var(--ease); }
@@ -243,9 +245,9 @@
 <script>
   const $ = (id) => document.getElementById(id);
   const feed = $("feed"), positions = $("positions"), drawer = $("drawer");
-  const state = { seen: 0, fired: 0, startedAt: Date.now(), live: false, paused: true, pos: new Map(), posSig: "", rows: new Map(), filter: "all", q: "", sound: false, sel: null, rules: null, tempo: [], refs: {}, health: null, lastTick: Date.now(), connected: false };
+  const state = { seen: 0, fired: 0, startedAt: Date.now(), live: false, paused: true, pos: new Map(), posSig: "", rows: new Map(), filter: "all", q: "", sound: false, sel: null, rules: null, tempo: [], refs: {}, health: null, lastTick: Date.now(), connected: false, engineError: null };
   const timeFormatter = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "UTC" });
-  const fmtEth = (wei) => (Number(BigInt(wei)) / 1e18).toFixed(4);
+  const fmtEth = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(4); } catch { return "?"; } };
   const fmtPnl = (value) => typeof value === "number" && Number.isFinite(value) ? `${value >= 0 ? "+" : ""}${value.toFixed(1)}%` : "n/a";
   const pnlClass = (value) => typeof value !== "number" ? "" : value > 0 ? "up" : value < 0 ? "down" : "";
   const hhmm = (t) => timeFormatter.format(new Date(t));
@@ -277,10 +279,12 @@
   function renderMode() {
     const m = $("mode"), t = $("mode-text"), run = $("run");
     const armed = state.live && !state.paused;
-    m.className = "pill" + (armed ? " live" : "") + (!state.paused && !state.live ? " paused" : "");
-    t.textContent = !state.connected ? "connecting" : state.live ? (state.paused ? "LIVE · not armed" : "LIVE · armed") : (state.paused ? "feed only" : "demo trading");
+    const stopped = !!state.health?.stopped;
+    m.className = stopped ? "pill" : "pill" + (armed ? " live" : "") + (!state.paused && !state.live ? " paused" : "");
+    t.textContent = stopped ? "halted" : !state.connected ? "connecting" : state.live ? (state.paused ? "LIVE · not armed" : "LIVE · armed") : (state.paused ? "feed only" : "demo trading");
     run.textContent = state.live ? (state.paused ? "arm live sniping" : "disarm") : (state.paused ? "start demo" : "stop demo");
     run.className = "btn" + (state.live && state.paused ? " arm" : "") + (!state.paused ? " on" : "");
+    run.disabled = stopped;
     run.setAttribute("aria-pressed", !state.paused ? "true" : "false");
     $("sound").setAttribute("aria-pressed", state.sound ? "true" : "false");
     $("foot-mode").textContent = state.live ? "LIVE" : "dry run";
@@ -292,13 +296,15 @@
     if (state.live && state.paused && !confirm("Arm LIVE sniping? Real ETH leaves your wallet under the rules on screen, up to the session budget.")) return;
     const b = $("run"); b.disabled = true;
     try { const r = await post(state.paused ? "/api/start" : "/api/stop"); state.paused = r.paused; renderMode(); toast(state.paused ? "stopped: launches keep coming, nothing fires" : state.live ? "armed" : "demo started: dry-run buys are on"); }
-    catch {} finally { b.disabled = false; }
+    catch {} finally { if (!state.health?.stopped) b.disabled = false; }
   };
   $("sound").onclick = () => { state.sound = !state.sound; renderMode(); if (state.sound) beep(); };
 
   /* the pulse: the engine ticks every 10 s; silence means it is gone, not that the chain is quiet */
   function renderNotice() {
     const n = $("notice");
+    if (state.health?.stopped) { n.hidden = false; n.className = "notice bad"; n.textContent = `engine halted${state.engineError ? ": " + state.engineError : ""}. Close its console window and start bodkin again.`; return; }
+    if (state.engineError) { n.hidden = false; n.className = "notice bad"; n.textContent = `engine error: ${state.engineError} · firing paused, check the console before starting again`; return; }
     const sinceTick = Date.now() - state.lastTick;
     if (state.connected && sinceTick > 35000) { n.hidden = false; n.className = "notice bad"; n.textContent = `the engine has not answered for ${Math.round(sinceTick / 1000)} s. Close its console window and start it again.`; return; }
     const h = state.health;
@@ -348,8 +354,8 @@
       <td><button class="copy name" data-detail="${esc(e.token)}" aria-label="View ${esc(e.name || 'token')} details">${esc((e.name || "?").slice(0, 26))}</button> <span class="sym">$${esc((e.symbol || "?").replace(/^\$/, ""))}</span> <button class="copy" data-copy="${esc(e.token)}" title="copy contract" aria-label="copy contract address">⧉</button></td>
       <td>${esc(e.pair || "ETH")}</td><td>${(e.devPct ?? 0).toFixed(2)}%</td><td>${((e.taxBps ?? 0) / 100).toFixed(1)}%</td>
       <td><span class="score ${scoreClass(s)}">${s}<i><b style="transform:scaleX(${(s / 100).toFixed(2)})"></b></i></span></td>
-      <td>${e.fire ? '<span class="tag fire">FIRE</span>' : '<span class="tag pass">pass</span>'}</td>
-      <td>${whyHtml(e)}</td>`;
+      <td data-cell="decision">${e.fire ? '<span class="tag fire">FIRE</span>' : '<span class="tag pass">pass</span>'}</td>
+      <td data-cell="why">${whyHtml(e)}</td>`;
     feed.prepend(tr);
     state.rows.set(e.token, { e, tr });
     applyFilter(tr, e);
@@ -358,7 +364,7 @@
   function applyFilter(tr, e) {
     const q = state.q;
     let show = true;
-    if (state.filter === "fire") show = !!e.fire || e.verdict === "FIRE";
+    if (state.filter === "fire") show = !!e.fire || e.held || e.verdict === "FIRE";
     if (state.filter === "eth") show = (e.pair || "ETH") === "ETH";
     if (show && q) show = `${e.name} ${e.symbol} ${e.token}`.toLowerCase().includes(q);
     tr.classList.toggle("hidden", !show);
@@ -377,8 +383,9 @@
     const { e, tr } = row; const d = e.detail || {};
     document.querySelectorAll("tr.sel").forEach((x) => x.classList.remove("sel")); tr.classList.add("sel"); state.sel = token;
     const reasons = (d.reasons || []).map((r) => { const m = r.match(/^([+-]\d+)\s(.*)$/); const n = m ? Number(m[1]) : 0; return `<li><span class="${n > 0 ? "plus" : n < 0 ? "minus" : ""}">${m ? m[1] : ""}</span>${esc(m ? m[2] : r)}</li>`; }).join("");
-    const exempt = (d.exempt || []).length ? (d.exempt || []).map((a) => `<div>${short(a)}</div>`).join("") : "none";
+    const exempt = d.exempt == null ? "?" : d.exempt.length ? d.exempt.map((a) => `<div>${short(a)}</div>`).join("") : "none";
     const prog = d.progress == null ? null : Math.min(100, d.progress * 100);
+    const openingTaxBps = d.openingTaxBps == null ? null : Number(d.openingTaxBps);
     const social = (label, u) => { const s = safeUrl(u); return s ? `<a class="btn sm" target="_blank" rel="noopener" href="${esc(s)}">${label}</a>` : ""; };
     $("drawer-body").innerHTML = `
       <h3>${esc(e.name || "?")} <span style="color:var(--muted)">$${esc((e.symbol || "").replace(/^\$/, ""))}</span></h3>
@@ -393,17 +400,17 @@
         ${social("tg", d.socials?.tg)}
       </div>
       ${d.description ? `<p class="desc">${esc(d.description)}</p>` : ""}
-      <div class="why">${e.fire ? "<b>FIRE</b> · passed every rule, waits for the opening tax, then buys" : `<b>pass</b> · ${esc((e.why || []).join(" · "))}`}</div>
+      <div class="why">${e.fire ? "<b>FIRE</b> · passed every rule, waits for the opening tax, then buys" : e.held ? `<b>held</b> · ${esc((e.why || []).join(" · "))}` : `<b>pass</b> · ${esc((e.why || []).join(" · "))}`}</div>
       <dl style="margin-top:14px">
         <dt>score</dt><dd class="${(e.score ?? 0) >= 75 ? "neon" : ""}">${e.score} · ${esc(e.verdict || "")}</dd>
         <dt>pair</dt><dd>${esc(e.pair || "ETH")}</dd>
         <dt>dev buy</dt><dd>${(e.devPct ?? 0).toFixed(2)}% of supply${d.devBuy ? ` · ${d.devBuy} ${esc(e.pair || "ETH")}` : ""}</dd>
         <dt>creator tax</dt><dd>${((e.taxBps ?? 0) / 100).toFixed(2)}%</dd>
-        <dt>fees go to</dt><dd class="${d.feeToDeployer ? "" : "neon"}">${d.feeRecipient ? (d.feeToDeployer ? "the deployer" : short(d.feeRecipient) + " · third party") : "?"}</dd>
+        <dt>fees go to</dt><dd class="${d.feeRecipient && !d.feeToDeployer ? "neon" : ""}">${d.feeRecipient ? (d.feeToDeployer ? "the deployer" : short(d.feeRecipient) + " · third party") : "?"}</dd>
         <dt>exempt</dt><dd>${exempt}</dd>
         <dt>deployer</dt><dd>${short(d.deployer)}${d.deployerPrior != null ? ` · ${d.deployerPrior} prior, ${d.deployerGraduated} graduated` : ""}</dd>
-        <dt>opening tax</dt><dd class="${(d.openingTaxBps || 0) > 300 ? "loss" : ""}">${d.openingTaxBps == null ? "?" : (d.openingTaxBps / 100).toFixed(2) + "% at read time"}</dd>
-        <dt>curve</dt><dd>${prog == null ? "?" : prog.toFixed(1) + "% to graduation"}<div class="bar"><b style="transform:scaleX(${((prog ?? 0) / 100).toFixed(3)})"></b></div></dd>
+        <dt>opening tax</dt><dd class="${(openingTaxBps ?? 0) > 300 ? "loss" : ""}">${openingTaxBps == null ? "?" : (openingTaxBps / 100).toFixed(2) + "% at read time"}</dd>
+        <dt>curve</dt><dd>${d.graduated ? "graduated" : prog == null ? "?" : prog.toFixed(1) + "% to graduation"}<div class="bar"><b style="transform:scaleX(${((prog ?? 0) / 100).toFixed(3)})"></b></div></dd>
         <dt>read in</dt><dd>${e.readMs ?? "?"} ms · block ${d.block ?? "?"}</dd>
         ${d.errors?.length ? `<dt>errors</dt><dd class="loss">${esc(d.errors.join("; "))}</dd>` : ""}
       </dl>
@@ -493,15 +500,21 @@
       state.refs = e.refs || {}; state.health = e.health || null; state.lastTick = Date.now(); state.connected = true; renderRefs();
       state.pos.clear(); state.posSig = "";
       for (const p of e.positions || []) {
-        state.pos.set(p.id, { symbol: p.symbol, ethIn: p.ethIn, pnl: p.pnl, status: p.status, venue: "curve", reason: p.reason, closedAt: p.closedAt, held: p.held, realizedWei: p.realizedWei, basisWei: p.basisWei });
+        state.pos.set(p.id, { symbol: p.symbol, ethIn: p.ethIn, pnl: p.pnl, status: p.status, venue: "curve", reason: p.reason, closedAt: p.closedAt, held: p.held, realizedWei: p.realizedWei, basisWei: p.basisWei, closing: !!p.closing });
       }
       renderMode(); renderRules();
-    } else if (e.kind === "tick") { state.lastTick = Date.now(); state.health = e.health || null; if (state.paused !== !!e.paused) { state.paused = !!e.paused; renderMode(); } }
+    } else if (e.kind === "tick") {
+      const wasStopped = !!state.health?.stopped;
+      state.lastTick = Date.now(); state.health = e.health || null;
+      if (state.paused !== !!e.paused) { state.paused = !!e.paused; renderMode(); }
+      else if (!!state.health?.stopped !== wasStopped) renderMode();
+    }
     else if (e.kind === "launch") {
       // Replays in the SSE prelude re-send launches already counted live.
       if (state.rows.has(e.token)) return;
-      if (!e.replay) { state.seen++; state.tempo.push(e.t); if (state.tempo.length > 500) state.tempo.shift(); }
-      addRow(e, !e.replay); if (e.fire && !e.replay) { bump("st-seen"); }
+      if (!e.replay) state.seen++;
+      state.tempo.push(e.t); if (state.tempo.length > 500) state.tempo.shift();
+      addRow(e, !e.replay); if (!e.replay) { bump("st-seen"); }
     }
     else if (e.kind === "fire") {
       if (state.pos.has(e.positionId)) return;
@@ -509,7 +522,19 @@
       state.pos.set(e.positionId, { symbol: (e.symbol || "?").replace(/^\$/, ""), ethIn: e.ethIn, pnl: 0, status: "open", venue: "curve", held: e.tokens, realizedWei: "0", closing: false });
       toast(`${state.live ? "bought" : "dry fire"} ${e.symbol} at tax ${(e.taxBps / 100).toFixed(2)}%${e.simulated ? " (simulated)" : ` after ${e.waitedMs} ms`}`);
     }
-    else if (e.kind === "hold") { if (state.live && e.why?.length) toast(`held ${short(e.token)}: ${e.why[0]}`); }
+    else if (e.kind === "hold") {
+      const row = state.rows.get(e.token);
+      if (row) {
+        row.e.fire = false; row.e.held = true; row.e.why = e.why || []; row.tr.classList.remove("fire", "fresh");
+        const dec = row.tr.querySelector('[data-cell="decision"]');
+        if (dec) dec.innerHTML = '<span class="tag hold">held</span>';
+        const why = row.tr.querySelector('[data-cell="why"]');
+        if (why) why.innerHTML = whyHtml(row.e);
+        applyFilter(row.tr, row.e);
+      }
+      if (e.why?.length) toast(`held ${short(e.token)}: ${e.why[0]}`);
+    }
+    else if (e.kind === "engine_error") { state.engineError = e.message || "engine error"; toast(state.engineError); renderMode(); }
     else if (e.kind === "entry") {
       const label = { reverted: "reverted on-chain", unresolved: "accepted, no receipt yet — it may still land", no_fill: "confirmed but no tokens received" }[e.status] || e.status;
       toast(`entry ${short(e.token)}: ${label}`);
@@ -533,7 +558,7 @@
       toast(e.message || "close failed");
       renderPositions();
     }
-    else if (e.kind === "paused") { state.paused = !!e.paused; renderMode(); }
+    else if (e.kind === "paused") { state.paused = !!e.paused; if (!state.paused) state.engineError = null; renderMode(); }
     else if (e.kind === "rules") { state.rules = e.rules; renderRules(); }
     else if (e.kind === "index") { toast(`deployer index: ${e.launches} launches, ${e.graduations} graduations`); }
     render();
@@ -549,6 +574,7 @@
   /* keys */
   document.addEventListener("keydown", (ev) => {
     if (ev.target.tagName === "INPUT") { if (ev.key === "Escape") ev.target.blur(); return; }
+    if ((ev.ctrlKey || ev.metaKey || ev.altKey || ev.isComposing) && ev.key !== "Escape") return;
     if (ev.key === "/") { ev.preventDefault(); $("search").focus(); }
     else if (ev.key === "p") $("run").click();
     else if (ev.key === "f") document.querySelector('[data-filter="fire"]').click();

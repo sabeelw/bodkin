@@ -1145,7 +1145,8 @@ async fn handle_launch(
         });
         d.fire = false;
     }
-    let has_x = has_socials(intel.meta.as_ref()).twitter;
+    let soc = has_socials(intel.meta.as_ref());
+    let graduated = intel.record.as_ref().is_some_and(|r| r.phase != 0);
     emit(serde_json::json!({
         "kind":"launch","t": now_ms(),
         "token":format!("{:#x}",ev.token),"curve":format!("{:#x}",ev.curve),
@@ -1157,11 +1158,23 @@ async fn handle_launch(
         "detail": {
             "reasons": score.reasons,
             "description": intel.meta.as_ref().map(|m| m.description.chars().take(280).collect::<String>()).unwrap_or_default(),
-            "socials": {"x": if has_x { safe_url(intel.meta.as_ref().map(|m| m.socials.twitter.as_str()).unwrap_or("")) } else { String::new() }},
+            "socials": {
+                "x": if soc.twitter { safe_url(intel.meta.as_ref().map(|m| m.socials.twitter.as_str()).unwrap_or("")) } else { String::new() },
+                "web": if soc.website { safe_url(intel.meta.as_ref().map(|m| m.socials.website.as_str()).unwrap_or("")) } else { String::new() },
+                "tg": if soc.telegram { safe_url(intel.meta.as_ref().map(|m| m.socials.telegram.as_str()).unwrap_or("")) } else { String::new() }
+            },
             "deployer": format!("{:#x}", ev.deployer),
             "deployerPrior": dq.map(|d| d.0), "deployerGraduated": dq.map(|d| d.1),
             "exempt": intel.tx.as_ref().map(|t| t.exemptions.iter().map(|a| format!("{a:#x}")).collect::<Vec<_>>()),
             "openingTaxBps": intel.curve.as_ref().map(|c| c.opening_tax_bps.to_string()),
+            "feeRecipient": intel.record.as_ref().map(|r| format!("{:#x}", r.creator_fee_recipient)),
+            "feeToDeployer": match (&intel.record, &intel.tx) {
+                (Some(r), Some(t)) => Some(r.creator_fee_recipient == t.from),
+                _ => None,
+            },
+            "devBuy": intel.tx.as_ref().map(|t| format!("{:.4}", crate::fmt::wei_to_f64(t.dev_buy_wei) / 10f64.powi(intel.pair.decimals as i32))),
+            "graduated": graduated,
+            "progress": intel.curve.as_ref().filter(|_| !graduated).map(crate::pons::curve::progress),
             "block": ev.block_number.to_string(), "tx": format!("{:#x}", ev.tx_hash), "errors": intel.errors
         }
     }));

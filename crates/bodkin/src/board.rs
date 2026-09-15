@@ -473,6 +473,7 @@ fn rules_view(r: &SnipeRules) -> Value {
 }
 
 fn positions_view(st: &BoardState) -> Value {
+    let closing = st.close_requests.lock();
     json!(
         st.engine
             .positions()
@@ -481,6 +482,7 @@ fn positions_view(st: &BoardState) -> Value {
             // live positions it could (incorrectly) offer to close.
             .filter(|p| p.dry_run != st.live)
             .map(|p| {
+                let is_closing = closing.contains(&p.id);
                 let basis = p.basis();
                 let last: U256 = if p.status == "open" {
                     p.last_eth.parse().unwrap_or(basis)
@@ -494,6 +496,7 @@ fn positions_view(st: &BoardState) -> Value {
                     "id": p.id, "token": format!("{:#x}", p.token), "symbol": p.symbol,
                     "ethIn": p.entry_eth, "held": p.tokens, "status": p.status,
                     "pnl": pnl, "dryRun": p.dry_run, "openedAt": p.opened_at * 1000,
+                    "closing": is_closing,
                     "reason": p.exits.last().map(|e| e.reason.clone()),
                     "closedAt": p.exits.last().map(|e| e.at * 1000),
                     "realizedWei": p.net_realized_pnl_wei(),
@@ -762,6 +765,7 @@ mod tests {
         .await;
         assert_eq!(first_state["positions"], second_state["positions"]);
         assert_eq!(first_state["seen"], second_state["seen"]);
+        assert_eq!(first_state["positions"][0]["closing"], false);
 
         let path = format!("/api/close/{}", position.id);
         let first = json_body(
@@ -780,6 +784,15 @@ mod tests {
         .await;
         assert_eq!(first["queued"], true);
         assert_eq!(second["alreadyPending"], true);
+
+        let after_close = json_body(
+            app.clone()
+                .oneshot(request(Method::GET, "/api/state"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(after_close["positions"][0]["closing"], true);
 
         let response = app
             .clone()
