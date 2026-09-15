@@ -137,6 +137,8 @@ struct Gate {
     spacing_ms: u64,
     logs_spacing_ms: u64,
     in_flight: usize,
+    background: Semaphore,
+    enrich_pending: AtomicU64,
 }
 
 pub struct Rpc {
@@ -188,6 +190,8 @@ impl Rpc {
                     spacing_ms: cfg.rpc_spacing_ms,
                     logs_spacing_ms: cfg.rpc_logs_spacing_ms,
                     in_flight,
+                    background: Semaphore::new(1),
+                    enrich_pending: AtomicU64::new(0),
                 })
             },
             latency: LatencyRecorder::default(),
@@ -220,6 +224,12 @@ impl Rpc {
     }
 
     pub async fn call(&self, lane: Lane, method: &str, params: Value) -> anyhow::Result<Value> {
+        let _enrich_pending = (lane == Lane::Enrich).then(|| {
+            self.gate.enrich_pending.fetch_add(1, Ordering::Relaxed);
+            scopeguard::guard(&self.gate.enrich_pending, |pending| {
+                pending.fetch_sub(1, Ordering::Relaxed);
+            })
+        });
         let started = Instant::now();
         let mut attempt = 0usize;
         let result = (|| {
@@ -256,6 +266,11 @@ impl Rpc {
                 "no configured endpoint serves {method}"
             )));
         }
+        let _background = if lane == Lane::Background {
+            Some(self.acquire_background().await)
+        } else {
+            None
+        };
         let endpoint = list[attempt % list.len()].clone();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let body = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
@@ -692,6 +707,22 @@ impl Rpc {
                 .acquire()
                 .await
                 .expect("gate semaphore closed"),
+        }
+    }
+
+    async fn acquire_background(&self) -> SemaphorePermit<'_> {
+        loop {
+            let permit = self
+                .gate
+                .background
+                .acquire()
+                .await
+                .expect("gate semaphore closed");
+            if self.gate.enrich_pending.load(Ordering::Relaxed) == 0 {
+                return permit;
+            }
+            drop(permit);
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 
@@ -1217,5 +1248,29 @@ mod tests {
         drop(b1);
         drop(b2);
         drop(hot);
+    }
+
+    #[tokio::test]
+    async fn background_yields_to_enrich_and_serializes() {
+        let rpc = Rpc::new(&test_cfg(3, 0)).unwrap();
+        rpc.gate.enrich_pending.store(1, Ordering::Relaxed);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), rpc.acquire_background())
+                .await
+                .is_err()
+        );
+        rpc.gate.enrich_pending.store(0, Ordering::Relaxed);
+        let first = tokio::time::timeout(Duration::from_millis(100), rpc.acquire_background())
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), rpc.acquire_background())
+                .await
+                .is_err()
+        );
+        drop(first);
+        let _permit = tokio::time::timeout(Duration::from_millis(100), rpc.acquire_background())
+            .await
+            .unwrap();
     }
 }

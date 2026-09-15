@@ -98,7 +98,7 @@ bodkin snipe [--live] [--eth <n>] [--min-score <n>] [--max-tax-bps <n>] [--slipp
 | `--yes` | off | skip the live confirmation prompt (for scripts) |
 | `--for <seconds>` | | stop after this many seconds |
 
-The loop: detect → strict Multicall/transaction enrichment → score and rules → reserve budget/slot → wait to the `launchedAt + 2` gate → ingest ordered curve flow → recheck pause and live gates → pre-sign and dispatch the sequencer burst just before the first +2 block → reconcile every attempted hash and matching receipt event before opening a position. Marks run every second for the first minute and every 30 seconds later. On-curve exits are ladder, stale, insider sell, or graduation boundary; take-profit, stop-loss, trailing stop, and max-hold apply only after graduation. Every refusal reports its reason.
+The loop: detect → strict Multicall/transaction enrichment → score and rules → reserve budget/slot → wait to the `launchedAt + 2` gate → ingest ordered curve flow → recheck pause and live gates → pre-sign and dispatch the sequencer burst just before the first +2 block → reconcile every attempted hash and matching receipt event before opening a position. Marks run every second for the first minute and every `MANAGE_SLOW_SEC` seconds later (default 5). On-curve exits are ladder, stale, insider sell, or graduation boundary; take-profit, stop-loss, trailing stop, and max-hold apply only after graduation. Every refusal reports its reason.
 
 With `--live`, before anything is armed, the terminal prints the signer, balance, size per buy, worst-case gas across the configured burst, position cap, and session budget. Balance and budget must cover one entry plus that reserve before it accepts `arm`. Admission reserves the worst case, then receipt reconciliation commits actual entry value and mined gas; unresolved attempts retain the reservation.
 
@@ -225,6 +225,7 @@ with `--live`, calls `claim()` and prints the receipt-derived `Claimed` amount.
 | `BURST_MAX` / `BURST_LEAD_MS` | 8 / 150 | parallel pre-signed sends over persistent clients for each pinned IP |
 | `EXIT_LADDER` | `34@100,33@300` | on-curve partials |
 | `STALE_SEC` / `STALE_MIN_PROGRESS` | 90 / 0.02 | on-curve stale exit |
+| `MANAGE_SLOW_SEC` | 5 | mark/eval cadence for positions older than 60 s |
 | `MIN_TAXED_BUYERS_S1` / `MAX_EXEMPT_BUYS_S0` | 0 / 32 | live gate |
 | `ABORT_IF_INSIDER_SOLD` | true | live gate |
 | `REF_AXIOM` | phosphen | Axiom handle for the sign-up link at startup and in the board footer; empty drops it |

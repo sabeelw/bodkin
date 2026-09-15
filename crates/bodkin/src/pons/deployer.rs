@@ -112,7 +112,63 @@ impl Limiter {
         let _p = self.sem.acquire().await.expect("limiter closed");
         f().await
     }
+
+    pub async fn run_timed<T, F, Fut>(&self, f: F) -> (T, u64, u64)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let queued = std::time::Instant::now();
+        let _permit = self.sem.acquire().await.expect("limiter closed");
+        let waited_ms = u64::try_from(queued.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let started = std::time::Instant::now();
+        let value = f().await;
+        let work_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        (value, waited_ms, work_ms)
+    }
 }
 
 /// Shared index used by hunt / snipe / board.
 pub type SharedIndex = Arc<Mutex<DeployerIndex>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn run_timed_reports_queue_and_work() {
+        let limiter = Arc::new(Limiter::new(1));
+        let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let held = tokio::spawn({
+            let limiter = limiter.clone();
+            async move {
+                limiter
+                    .run(|| async move {
+                        let _ = acquired_tx.send(());
+                        let _ = release_rx.await;
+                    })
+                    .await;
+            }
+        });
+        acquired_rx.await.unwrap();
+        let timed = tokio::spawn({
+            let limiter = limiter.clone();
+            async move {
+                limiter
+                    .run_timed(|| async {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        7
+                    })
+                    .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        release_tx.send(()).unwrap();
+        let (value, waited_ms, work_ms) = timed.await.unwrap();
+        held.await.unwrap();
+        assert_eq!(value, 7);
+        assert!(waited_ms >= 15, "waited_ms={waited_ms}");
+        assert!(work_ms >= 15, "work_ms={work_ms}");
+    }
+}

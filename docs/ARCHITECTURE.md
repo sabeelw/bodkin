@@ -62,4 +62,5 @@ flowchart LR
 - **Conditional is a probe.** Default TxPreChecker compares to the last *sealed* header. `timestampMin = launchedAt+2` is late by one
   ~100 ms block. Reject-not-wait. `blockNumberMin/Max` are L1 numbers. `doctor --probe` must show immediate `-32003` before anyone parks on it.
 - **Deployer history from memory.** ~1.73M blocks (~2 days) on the background lane. Do not call the ponsfamily HTTP API (v1-only).
+  Startup history scans run serialized on a single-permit limiter so they yield RPC capacity to deadline-bound launch enrichment; launch outcome records include detection, queue, enrichment, fee-check, and decision timings.
 - **Graduation pool split.** 20.41 % of supply + 4.2 ETH in the v4 pool; 8.16 % locked. Do not quote the pool as 28.57 %.

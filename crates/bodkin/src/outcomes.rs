@@ -16,6 +16,7 @@ pub enum OutcomeKind {
     Fire,
     Exit,
     ExitFailed,
+    Hold,
 }
 
 impl OutcomeKind {
@@ -28,6 +29,7 @@ impl OutcomeKind {
             Self::Fire => "fire",
             Self::Exit => "exit",
             Self::ExitFailed => "exit_failed",
+            Self::Hold => "hold",
         }
     }
 }
@@ -133,6 +135,7 @@ impl OutcomeLog {
 #[derive(Debug, Default)]
 pub struct OutcomeSummary {
     pub launches: u64,
+    pub holds: u64,
     pub attempts: u64,
     pub fills: u64,
     /// Simulated dry-run entries — counted apart from real fills.
@@ -171,6 +174,7 @@ pub fn summarize(events: &[serde_json::Value]) -> OutcomeSummary {
             || flag("dryRun") == Some(true);
         match e.get("kind").and_then(|k| k.as_str()).unwrap_or("") {
             "launch_seen" => s.launches += 1,
+            "hold" => s.holds += 1,
             "attempt" => {
                 s.attempts += 1;
                 if !simulated
@@ -262,8 +266,8 @@ pub fn summarize(events: &[serde_json::Value]) -> OutcomeSummary {
 
 pub fn print_summary(s: &OutcomeSummary) {
     println!(
-        "launches {}  attempts {}  confirmed fills {}  simulated {}  unverified fires {}  observed first-block-of-+2 {}",
-        s.launches, s.attempts, s.fills, s.simulated, s.unknown_fires, s.first_block_plus2
+        "launches {}  holds {}  attempts {}  confirmed fills {}  simulated {}  unverified fires {}  observed first-block-of-+2 {}",
+        s.launches, s.holds, s.attempts, s.fills, s.simulated, s.unknown_fires, s.first_block_plus2
     );
     let hit_rate = if s.measured_exits == 0 {
         "n/a".into()

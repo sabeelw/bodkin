@@ -28,6 +28,8 @@ fn ev() -> LaunchEvent {
         block_number: 53_000_000,
         tx_hash: Default::default(),
         log_index: 0,
+        detected_at_ms: 0,
+        source: "unknown",
     }
 }
 
@@ -79,6 +81,7 @@ fn builder() -> LaunchIntel {
         pair: PairInfo::eth(),
         errors: vec![],
         fee_recipient_is_contract: None,
+        fee_check_ms: 0,
     }
 }
 
@@ -213,6 +216,8 @@ fn deployer_index_from_memory() {
         block_number: block,
         tx_hash: Default::default(),
         log_index: 0,
+        detected_at_ms: 0,
+        source: "unknown",
     };
     assert!(idx.quick(A, 100).is_none());
     idx.mark_ready();
@@ -380,6 +385,7 @@ fn unreadable_launch_refused_as_unreadable() {
         pair: PairInfo::eth(),
         errors: vec!["tx: HTTP 429 after 5 tries".into()],
         fee_recipient_is_contract: None,
+        fee_check_ms: 0,
     };
     let d = decide(
         &intel,

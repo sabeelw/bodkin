@@ -823,7 +823,19 @@ mod tests {
         assert!(saw_resync);
 
         let now = now_ms();
-        state.engine.clock().note_header(now / 1_000, now, 1, 2);
+        let ts_now = now / 1_000;
+        let last = state.engine.clock().last_ts();
+        // Replay one boundary per second at a clean 1 s cadence so quality does
+        // not hinge on how much wall time the SSE section above took.
+        for ts in (last + 1)..=ts_now {
+            state
+                .engine
+                .clock()
+                .note_header(ts, now - (ts_now - ts) * 1_000, 1, 1 + (ts - last));
+        }
+        if ts_now == last {
+            state.engine.clock().note_header(ts_now, now, 1, 2);
+        }
         for _ in 0..2 {
             let response = app
                 .clone()

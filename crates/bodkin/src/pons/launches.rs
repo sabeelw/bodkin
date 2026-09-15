@@ -25,6 +25,8 @@ pub struct LaunchEvent {
     pub block_number: u64,
     pub tx_hash: B256,
     pub log_index: u64,
+    pub detected_at_ms: u64,
+    pub source: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,8 @@ fn to_event(log: &Log) -> Option<LaunchEvent> {
         block_number: log.block_number?,
         tx_hash: log.transaction_hash?,
         log_index: log.log_index?,
+        detected_at_ms: 0,
+        source: "unknown",
     })
 }
 
@@ -125,7 +129,7 @@ pub fn watch_launches(
         let health = health.clone();
         let tx = tx.clone();
         let last_block = last_block.clone();
-        move |ev: LaunchEvent, source: &'static str, removed: bool| {
+        move |mut ev: LaunchEvent, source: &'static str, removed: bool| {
             let seen = seen.clone();
             let health = health.clone();
             let tx = tx.clone();
@@ -148,12 +152,14 @@ pub fn watch_launches(
                 if !should_send {
                     return;
                 }
+                ev.detected_at_ms = now_ms();
+                ev.source = source;
                 last_block.fetch_max(ev.block_number, Ordering::SeqCst);
                 {
                     let mut current = health.lock();
-                    current.last_launch_at = now_ms();
+                    current.last_launch_at = ev.detected_at_ms;
                     if source == "websocket" {
-                        current.last_ws_at = now_ms();
+                        current.last_ws_at = ev.detected_at_ms;
                     }
                 }
                 let _ = tx.send(ev).await;

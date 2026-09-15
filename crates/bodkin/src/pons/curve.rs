@@ -77,6 +77,14 @@ pub fn effective_opening_bps(s: &CurveState) -> U256 {
     }
 }
 
+/// A snapshot read before the entry second still carries the launch-time tax;
+/// normalize it to the tax modeled for the actual entry second before quoting.
+pub fn with_entry_tax(s: &CurveState, entry_tax_bps: u64) -> CurveState {
+    let mut s = s.clone();
+    s.opening_tax_bps = U256::from(entry_tax_bps);
+    s
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuyQuote {
     pub tokens_out: U256,

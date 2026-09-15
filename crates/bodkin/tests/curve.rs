@@ -1,7 +1,7 @@
 use alloy::primitives::{U256, address};
 use bodkin::pons::curve::{
-    CurveState, amount_out, effective_opening_bps, fdv_quote, min_out_from_rate, progress,
-    quote_buy, quote_sell, spot_price,
+    CurveState, amount_out, effective_opening_bps, fdv_quote, min_out_as_last_in_block,
+    min_out_from_rate, progress, quote_buy, quote_sell, spot_price, with_entry_tax,
 };
 
 fn fresh(over: impl FnOnce(&mut CurveState)) -> CurveState {
@@ -75,6 +75,26 @@ fn ninety_nine_percent_tax_nearly_worthless() {
     );
     let clean = quote_buy(&fresh(|_| {}), U256::from(10u128.pow(17)));
     assert!(taxed.tokens_out * U256::from(20u64) < clean.tokens_out);
+}
+
+#[test]
+fn min_out_uses_modeled_entry_tax_not_stale_opening_tax() {
+    let spend = U256::from(10u128.pow(17));
+    let sibling = U256::from(100_000_000_000_000_000u128);
+    let stale = fresh(|s| s.opening_tax_bps = U256::from(9_900u64));
+    let normalized = with_entry_tax(&stale, 19);
+    let min_out = min_out_as_last_in_block(&normalized, spend, sibling, 300);
+    let at_19 = min_out_as_last_in_block(
+        &fresh(|s| s.opening_tax_bps = U256::from(19u64)),
+        spend,
+        sibling,
+        300,
+    );
+    let at_9900 = min_out_as_last_in_block(&stale, spend, sibling, 300);
+    // Normalized to the +2 tax the bound equals the 19 bps quote × (1 − slip);
+    // the stale 9900 read would bound it at ~1% of that.
+    assert_eq!(min_out, at_19);
+    assert!(at_9900 * U256::from(20u64) < min_out);
 }
 
 #[test]

@@ -111,4 +111,4 @@ No buy-on-demand route. `--live` is not a button.
 
 ## Docs vs code
 
-The current loop is documented in [docs/COMMANDS.md](../COMMANDS.md): detect → strict enrichment → atomic admission → flow gate at +2 − lead → sequencer burst → reconcile every attempted receipt → 1 s marks for the first minute, then 30 s → ladder / stale / insider / graduation-boundary exits, with TP/SL/trail/max-hold only after graduation. Do not restore the deleted Node poll-and-assume loop.
+The current loop is documented in [docs/COMMANDS.md](../COMMANDS.md): detect → strict enrichment → atomic admission → flow gate at +2 − lead → sequencer burst → reconcile every attempted receipt → 1 s marks for the first minute, then every MANAGE_SLOW_SEC (default 5) → ladder / stale / insider / graduation-boundary exits, with TP/SL/trail/max-hold only after graduation. Do not restore the deleted Node poll-and-assume loop.

@@ -3,7 +3,7 @@ use crate::engine::{SnipeRules, decide, live_gate, pick_exit};
 use crate::outcomes::{OutcomeKind, OutcomeLog};
 use crate::pons::clock::{ChainClock, now_ms, spawn_clock};
 use crate::pons::deployer::{Limiter, SharedIndex};
-use crate::pons::enrich::{dev_share_pct, enrich_launch, has_socials, is_contract};
+use crate::pons::enrich::{dev_share_pct, enrich_launch, has_socials};
 use crate::pons::fingerprint::FarmDetector;
 use crate::pons::launches::{FeedHealth, LaunchEvent, find_launch, watch_launches};
 use crate::pons::stream::FlowTracker;
@@ -445,18 +445,22 @@ async fn run_loop(
     let refresh_task = submitter.as_ref().map(Submitter::spawn_refresh);
     let burst = Arc::new(BurstCtl::from_env());
     let limiter = Arc::new(Limiter::new(3));
+    let history = Arc::new(Limiter::new(1));
     let index: SharedIndex = Arc::new(tokio::sync::Mutex::new(
         crate::pons::deployer::DeployerIndex::default(),
     ));
     let index_task = {
         let rpc = rpc.clone();
         let index = index.clone();
+        let history = history.clone();
         tokio::spawn(async move {
             // Two-day deployer history + which of those tokens graduated.
-            let (evs, grads) = tokio::join!(
-                crate::pons::launches::recent_launches(&rpc, 1_728_000, None, None),
-                crate::pons::launches::recent_graduations(&rpc, 1_728_000),
-            );
+            let evs = history
+                .run(|| crate::pons::launches::recent_launches(&rpc, 1_728_000, None, None))
+                .await;
+            let grads = history
+                .run(|| crate::pons::launches::recent_graduations(&rpc, 1_728_000))
+                .await;
             let mut idx = index.lock().await;
             if let Ok(evs) = evs {
                 for ev in &evs {
@@ -478,30 +482,35 @@ async fn run_loop(
     let grad_task = {
         let rpc = rpc.clone();
         let index = index.clone();
+        let history = history.clone();
         tokio::spawn(async move {
             let mut iv = tokio::time::interval(std::time::Duration::from_secs(60));
+            iv.tick().await;
             loop {
                 iv.tick().await;
-                let Ok(head) = rpc.block_number(Lane::Background).await else {
-                    continue;
-                };
-                let from = index
-                    .lock()
-                    .await
-                    .last_grad_block()
-                    .saturating_sub(2_000)
-                    .max(head.saturating_sub(50_000));
-                let Ok(logs) = rpc
-                    .get_logs(
-                        Lane::Background,
-                        alloy::rpc::types::Filter::new()
-                            .address(crate::chain::ADDR.pons_factory)
-                            .event_signature(crate::abi::topics::pool_graduated())
-                            .from_block(from)
-                            .to_block(head),
-                    )
-                    .await
-                else {
+                let scanned = history
+                    .run(|| async {
+                        let head = rpc.block_number(Lane::Background).await?;
+                        let from = index
+                            .lock()
+                            .await
+                            .last_grad_block()
+                            .saturating_sub(2_000)
+                            .max(head.saturating_sub(50_000));
+                        let logs = rpc
+                            .get_logs(
+                                Lane::Background,
+                                alloy::rpc::types::Filter::new()
+                                    .address(crate::chain::ADDR.pons_factory)
+                                    .event_signature(crate::abi::topics::pool_graduated())
+                                    .from_block(from)
+                                    .to_block(head),
+                            )
+                            .await?;
+                        anyhow::Ok((head, logs))
+                    })
+                    .await;
+                let Ok((_head, logs)) = scanned else {
                     continue;
                 };
                 let mut idx = index.lock().await;
@@ -563,6 +572,7 @@ async fn run_loop(
         let stop = stop.clone();
         let paused = paused.clone();
         tokio::spawn(async move {
+            let slow_sec = crate::config::env_u64("MANAGE_SLOW_SEC", 5).max(1);
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(1000));
             let mut n = 0u64;
             while !stop.load(Ordering::SeqCst) {
@@ -603,7 +613,7 @@ async fn run_loop(
                         continue;
                     }
                     let age = (now_ms() / 1000).saturating_sub(stale.opened_at);
-                    if age >= 60 && !n.is_multiple_of(30) {
+                    if age >= 60 && !n.is_multiple_of(slow_sec) {
                         continue;
                     }
                     let Some(mut guard) = CloseGuard::try_new(&stale.id, &closing) else {
@@ -1011,7 +1021,7 @@ async fn run_loop(
             }
             Some(ev) = rx.recv() => {
                 let Ok(entry_permit) = entry_slots.clone().try_acquire_owned() else {
-                    emit(serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["entry work queue full"]}));
+                    emit_hold(&emit, &outcomes, ev.token, vec!["entry work queue full".into()]);
                     continue;
                 };
                 let rpc = rpc.clone();
@@ -1066,6 +1076,32 @@ async fn run_loop(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct LaunchTiming {
+    detected_at_ms: Option<u64>,
+    detection_lag_ms: Option<u64>,
+    entry_queue_ms: Option<u64>,
+    decision_lag_ms: Option<u64>,
+}
+
+fn launch_timing(
+    detected_at_ms: u64,
+    entry_started_ms: u64,
+    launched_at: u64,
+    decision_at_ms: u64,
+) -> LaunchTiming {
+    let detected_at_ms = (detected_at_ms != 0).then_some(detected_at_ms);
+    let launched_ms = launched_at.saturating_mul(1000);
+    LaunchTiming {
+        detected_at_ms,
+        detection_lag_ms: detected_at_ms
+            .filter(|_| launched_at != 0)
+            .map(|detected| detected.saturating_sub(launched_ms)),
+        entry_queue_ms: detected_at_ms.map(|detected| entry_started_ms.saturating_sub(detected)),
+        decision_lag_ms: (launched_at != 0).then_some(decision_at_ms.saturating_sub(launched_ms)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_launch(
     rpc: Arc<Rpc>,
@@ -1102,8 +1138,8 @@ async fn handle_launch(
     };
     let t0 = now_ms();
     index.lock().await.note(&ev);
-    let intel = limiter
-        .run(|| enrich_launch(&rpc, ev.clone(), recipient))
+    let (intel, enrich_wait_ms, enrich_ms) = limiter
+        .run_timed(|| enrich_launch(&rpc, ev.clone(), recipient))
         .await;
     let dq = index.lock().await.quick(ev.deployer, ev.block_number);
     let twins = farms.lock().note(&intel, now_ms()).0;
@@ -1112,9 +1148,8 @@ async fn handle_launch(
         farm_twins: twins,
         ..Default::default()
     };
-    if let Some(rec) = &intel.record {
-        ctx.fee_recipient_is_contract = is_contract(&rpc, rec.creator_fee_recipient).await.ok();
-    }
+    ctx.fee_recipient_is_contract = intel.fee_recipient_is_contract;
+    let fee_check_ms = intel.fee_check_ms;
     let score = score_launch(&intel, &ctx);
     let rules_now = rules.lock().clone();
     let open = positions.open_positions().len();
@@ -1145,6 +1180,9 @@ async fn handle_launch(
         });
         d.fire = false;
     }
+    let decision_at_ms = now_ms();
+    let timing = launch_timing(ev.detected_at_ms, t0, launched_at, decision_at_ms);
+    let rpc_stats = rpc.stats();
     let soc = has_socials(intel.meta.as_ref());
     let graduated = intel.record.as_ref().is_some_and(|r| r.phase != 0);
     emit(serde_json::json!({
@@ -1155,6 +1193,16 @@ async fn handle_launch(
         "score": score.total, "verdict": score.verdict.as_str(), "fire": d.fire, "why": d.why,
         "devPct": dev_share_pct(intel.tx.as_ref()), "taxBps": intel.record.as_ref().map(|r| r.creator_tax_bps),
         "pair": intel.pair.symbol, "readMs": now_ms()-t0,
+        "timing": {
+            "source": ev.source,
+            "detectedAtMs": timing.detected_at_ms,
+            "detectionLagMs": timing.detection_lag_ms,
+            "entryQueueMs": timing.entry_queue_ms,
+            "enrichWaitMs": enrich_wait_ms,
+            "enrichMs": enrich_ms,
+            "feeCheckMs": fee_check_ms,
+            "decisionLagMs": timing.decision_lag_ms,
+        },
         "detail": {
             "reasons": score.reasons,
             "description": intel.meta.as_ref().map(|m| m.description.chars().take(280).collect::<String>()).unwrap_or_default(),
@@ -1186,6 +1234,31 @@ async fn handle_launch(
             "score":score.total,"verdict":score.verdict.as_str(),"screen_fire":screen_fire,
             "screen_why":screen_why,"operational_fire":d.fire,
             "curve_state":intel.curve.as_ref(),
+            "has_tx":intel.tx.is_some(),"has_meta":intel.meta.is_some(),
+            "has_record":intel.record.is_some(),
+            "dev_share_pct":dev_share_pct(intel.tx.as_ref()),
+            "exempt_wallets":intel.tx.as_ref().map(|t| t.exemptions.len()).unwrap_or(0),
+            "creator_tax_bps":intel.record.as_ref().map(|r| r.creator_tax_bps).unwrap_or(0),
+            "pair":intel.pair.symbol,
+            "fee_recipient":intel.record.as_ref().map(|r| format!("{:#x}", r.creator_fee_recipient)),
+            "fee_to_deployer":intel.record.as_ref().zip(intel.tx.as_ref()).is_some_and(|(r,t)| r.creator_fee_recipient == t.from),
+            "fee_recipient_is_contract":intel.fee_recipient_is_contract,
+            "deployer_prior":dq.map(|d| d.0),"deployer_graduated":dq.map(|d| d.1),
+            "farm_twins":twins,
+            "launch_source":ev.source,
+            "detected_at_ms":timing.detected_at_ms,
+            "detection_lag_ms":timing.detection_lag_ms,
+            "entry_queue_ms":timing.entry_queue_ms,
+            "enrich_wait_ms":enrich_wait_ms,
+            "enrich_ms":enrich_ms,
+            "fee_check_ms":fee_check_ms,
+            "decision_at_ms":decision_at_ms,
+            "decision_lag_ms":timing.decision_lag_ms,
+            "rpc_active":rpc_stats.active,
+            "rpc_queued":rpc_stats.queued,
+            "rpc_throttled":rpc_stats.throttled,
+            "rpc_cooling_down":rpc_stats.cooling_down,
+            "rpc_p95_us":rpc_stats.latency.p95_us,
         }),
     );
     if !d.fire {
@@ -1193,8 +1266,11 @@ async fn handle_launch(
         return;
     }
     if let Err(error) = clock.require_quality(2_000, 1_500) {
-        emit(
-            serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":[format!("clock quality: {error}")]}),
+        emit_hold(
+            &emit,
+            &outcomes,
+            ev.token,
+            vec![format!("clock quality: {error}")],
         );
         busy.lock().remove(&ev.token);
         return;
@@ -1212,8 +1288,11 @@ async fn handle_launch(
     let resv = match try_reserve(&spent, &open_res, &positions, &rules_now, risk_cost) {
         Some(r) => r,
         None => {
-            emit(
-                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["budget/slot/gas reservation unavailable"]}),
+            emit_hold(
+                &emit,
+                &outcomes,
+                ev.token,
+                vec!["budget/slot/gas reservation unavailable".into()],
             );
             busy.lock().remove(&ev.token);
             return;
@@ -1231,15 +1310,21 @@ async fn handle_launch(
     let chain_now = clock.sequencer_now();
     if boundary <= chain_now {
         // A late event must never fire "on schedule" — the window is gone.
-        emit(
-            serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["entry window already passed"]}),
+        emit_hold(
+            &emit,
+            &outcomes,
+            ev.token,
+            vec!["entry window already passed".into()],
         );
         busy.lock().remove(&ev.token);
         return;
     }
     if (boundary - chain_now).saturating_mul(1000) > rules_now.max_wait_ms {
-        emit(
-            serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["entry boundary too far out — stale clock or replayed event"]}),
+        emit_hold(
+            &emit,
+            &outcomes,
+            ev.token,
+            vec!["entry boundary too far out — stale clock or replayed event".into()],
         );
         busy.lock().remove(&ev.token);
         return;
@@ -1250,8 +1335,14 @@ async fn handle_launch(
     let snap = match sync_flow(&rpc, &flow, ev.curve, Lane::Hot).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            emit(
-                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":[format!("flow sync failed: {}",crate::fmt::first_line(&error.to_string()))]}),
+            emit_hold(
+                &emit,
+                &outcomes,
+                ev.token,
+                vec![format!(
+                    "flow sync failed: {}",
+                    crate::fmt::first_line(&error.to_string())
+                )],
             );
             busy.lock().remove(&ev.token);
             return;
@@ -1272,39 +1363,53 @@ async fn handle_launch(
             muted(crate::fmt::hhmmss(None)),
             g.why.join("; ")
         ));
-        emit(serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":g.why}));
+        emit_hold(&emit, &outcomes, ev.token, g.why);
         busy.lock().remove(&ev.token);
         return;
     }
     // Re-check the armed flag immediately before any send path.
     if paused.load(Ordering::SeqCst) {
-        emit(
-            serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["paused before send"]}),
+        emit_hold(
+            &emit,
+            &outcomes,
+            ev.token,
+            vec!["paused before send".into()],
         );
         busy.lock().remove(&ev.token);
         return;
     }
     let tax = snipe_tax_bps(start_bps, window, rules_now.entry_second);
     if tax > rules_now.max_opening_tax_bps {
-        emit(
-            serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":[format!("scheduled opening tax {tax} bps exceeds ceiling {}",rules_now.max_opening_tax_bps)]}),
+        emit_hold(
+            &emit,
+            &outcomes,
+            ev.token,
+            vec![format!(
+                "scheduled opening tax {tax} bps exceeds ceiling {}",
+                rules_now.max_opening_tax_bps
+            )],
         );
         busy.lock().remove(&ev.token);
         return;
     }
     if !live {
-        let mut snapshot = match crate::trade::curve::read_curve_state(&rpc, ev.curve, recipient)
-            .await
-        {
-            Ok(state) => state,
-            Err(error) => {
-                emit(
-                    serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":[format!("curve snapshot before entry: {}", crate::fmt::first_line(&error.to_string()))]}),
-                );
-                busy.lock().remove(&ev.token);
-                return;
-            }
-        };
+        let mut snapshot =
+            match crate::trade::curve::read_curve_state(&rpc, ev.curve, recipient).await {
+                Ok(state) => state,
+                Err(error) => {
+                    emit_hold(
+                        &emit,
+                        &outcomes,
+                        ev.token,
+                        vec![format!(
+                            "curve snapshot before entry: {}",
+                            crate::fmt::first_line(&error.to_string())
+                        )],
+                    );
+                    busy.lock().remove(&ev.token);
+                    return;
+                }
+            };
         let snapshot_second = snapshot.read_chain_ts.saturating_sub(launched_at);
         let earliest_snapshot = rules_now.entry_second.saturating_sub(1);
         if snapshot.read_chain_ts == 0
@@ -1315,15 +1420,24 @@ async fn handle_launch(
                 OutcomeKind::Attempt,
                 serde_json::json!({"token":format!("{:#x}",ev.token),"simulated":true,"confirmed":false,"configured_entry_second":rules_now.entry_second,"snapshot_second":snapshot_second,"tax":tax,"reason":"entry snapshot missed timing window"}),
             );
-            emit(
-                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":[format!("dry entry snapshot arrived at +{snapshot_second}; need +{earliest_snapshot}..+{}", rules_now.entry_second)]}),
+            emit_hold(
+                &emit,
+                &outcomes,
+                ev.token,
+                vec![format!(
+                    "dry entry snapshot arrived at +{snapshot_second}; need +{earliest_snapshot}..+{}",
+                    rules_now.entry_second
+                )],
             );
             busy.lock().remove(&ev.token);
             return;
         }
         if snapshot.graduated || snapshot.ready_to_graduate {
-            emit(
-                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["curve closed or graduated before entry"]}),
+            emit_hold(
+                &emit,
+                &outcomes,
+                ev.token,
+                vec!["curve closed or graduated before entry".into()],
             );
             busy.lock().remove(&ev.token);
             return;
@@ -1331,16 +1445,22 @@ async fn handle_launch(
         snapshot.opening_tax_bps = U256::from(tax);
         let q = crate::pons::curve::quote_buy(&snapshot, rules_now.eth_per_buy);
         if q.tokens_out.is_zero() {
-            emit(
-                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["simulated +2 entry buys zero tokens"]}),
+            emit_hold(
+                &emit,
+                &outcomes,
+                ev.token,
+                vec!["simulated +2 entry buys zero tokens".into()],
             );
             busy.lock().remove(&ev.token);
             return;
         }
         clock.sleep_until_unix(boundary).await;
         if paused.load(Ordering::SeqCst) || clock.require_quality(2_000, 1_500).is_err() {
-            emit(
-                serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["paused or chain clock unhealthy before entry"]}),
+            emit_hold(
+                &emit,
+                &outcomes,
+                ev.token,
+                vec!["paused or chain clock unhealthy before entry".into()],
             );
             busy.lock().remove(&ev.token);
             return;
@@ -1395,8 +1515,11 @@ async fn handle_launch(
     }
     let (Some(helper), Some(wallet), Some(sub)) = (helper, wallet, submitter) else {
         warn("live burst needs HELPER_ADDRESS, PRIVATE_KEY and sequencer");
-        emit(
-            serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["live entry needs helper, key and sequencer"]}),
+        emit_hold(
+            &emit,
+            &outcomes,
+            ev.token,
+            vec!["live entry needs helper, key and sequencer".into()],
         );
         busy.lock().remove(&ev.token);
         return;
@@ -1406,24 +1529,73 @@ async fn handle_launch(
         || stop.load(Ordering::SeqCst)
         || clock.sequencer_now() >= boundary
     {
-        emit(
-            serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["execution lane was not available before the entry boundary"]}),
+        emit_hold(
+            &emit,
+            &outcomes,
+            ev.token,
+            vec!["execution lane was not available before the entry boundary".into()],
         );
         busy.lock().remove(&ev.token);
         return;
     }
-    let min_out = intel
-        .curve
+    // The enrich snapshot is stale and still carries ~99% opening tax; re-read
+    // the curve and model the entry-second tax before sizing min_out.
+    let state = match crate::trade::curve::read_curve_state(&rpc, ev.curve, recipient).await {
+        Ok(state) => state,
+        Err(error) => {
+            emit_hold(
+                &emit,
+                &outcomes,
+                ev.token,
+                vec![format!(
+                    "curve snapshot before live entry: {}",
+                    crate::fmt::first_line(&error.to_string())
+                )],
+            );
+            busy.lock().remove(&ev.token);
+            return;
+        }
+    };
+    if state.graduated || state.ready_to_graduate {
+        emit_hold(
+            &emit,
+            &outcomes,
+            ev.token,
+            vec!["curve closed or graduated before entry".into()],
+        );
+        busy.lock().remove(&ev.token);
+        return;
+    }
+    // A declared exemption pays no opening tax on entry.
+    let modeled = if intel
+        .tx
         .as_ref()
-        .map(|c| {
-            crate::pons::curve::min_out_as_last_in_block(
-                c,
-                rules_now.eth_per_buy,
-                U256::from(100_000_000_000_000_000u128),
-                rules_now.slippage_bps,
-            )
-        })
-        .unwrap_or(U256::ZERO);
+        .is_some_and(|t| t.exemptions.contains(&recipient))
+    {
+        0
+    } else {
+        tax
+    };
+    let state = crate::pons::curve::with_entry_tax(&state, modeled);
+    if crate::pons::curve::quote_buy(&state, rules_now.eth_per_buy)
+        .tokens_out
+        .is_zero()
+    {
+        emit_hold(
+            &emit,
+            &outcomes,
+            ev.token,
+            vec!["live entry quote buys zero tokens".into()],
+        );
+        busy.lock().remove(&ev.token);
+        return;
+    }
+    let min_out = crate::pons::curve::min_out_as_last_in_block(
+        &state,
+        rules_now.eth_per_buy,
+        U256::from(100_000_000_000_000_000u128),
+        rules_now.slippage_bps,
+    );
     let data = encode_buy_once(
         ev.curve,
         ev.token,
@@ -1524,8 +1696,11 @@ async fn handle_launch(
                         serde_json::json!({"kind":"engine_error","message":"paused burst could not cleanly release its nonce or journal reservation; restart before sending again"}),
                     );
                 }
-                emit(
-                    serde_json::json!({"kind":"hold","token":format!("{:#x}",ev.token),"why":["paused before send"]}),
+                emit_hold(
+                    &emit,
+                    &outcomes,
+                    ev.token,
+                    vec!["paused before send".into()],
                 );
             } else {
                 let reconciliation =
@@ -1795,6 +1970,16 @@ async fn first_block_of_second(rpc: &Rpc, block_number: u64, second: u64) -> Opt
     )
 }
 
+/// A hold is both an SSE card and an outcome record — always emit both.
+fn emit_hold(emit: &Emit, outcomes: &OutcomeLog, token: Address, why: Vec<String>) {
+    let token = format!("{token:#x}");
+    emit(serde_json::json!({"kind":"hold","token":token,"why":why}));
+    outcomes.write(
+        OutcomeKind::Hold,
+        serde_json::json!({"token":token,"why":why}),
+    );
+}
+
 /// Only http(s) social links are passed to the board — anything else could be
 /// a `javascript:`/`data:` URL rendered as an anchor.
 fn safe_url(u: &str) -> String {
@@ -1849,5 +2034,27 @@ mod tests {
         assert_eq!(admitted.load(Ordering::SeqCst), 2);
         assert_eq!(*spent.lock(), U256::ZERO);
         assert_eq!(open.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn launch_timing_reports_each_phase() {
+        assert_eq!(
+            launch_timing(0, 10_700, 0, 11_200),
+            LaunchTiming {
+                detected_at_ms: None,
+                detection_lag_ms: None,
+                entry_queue_ms: None,
+                decision_lag_ms: None,
+            }
+        );
+        assert_eq!(
+            launch_timing(10_500, 10_700, 10, 11_200),
+            LaunchTiming {
+                detected_at_ms: Some(10_500),
+                detection_lag_ms: Some(500),
+                entry_queue_ms: Some(200),
+                decision_lag_ms: Some(1_200),
+            }
+        );
     }
 }

@@ -71,6 +71,13 @@ pub struct LaunchIntel {
     pub errors: Vec<String>,
     /// Cached `eth_getCode` of the fee recipient. None = not looked up.
     pub fee_recipient_is_contract: Option<bool>,
+    pub fee_check_ms: u64,
+}
+
+struct LaunchTxDetails {
+    tx: LaunchTx,
+    fee_recipient_is_contract: Option<bool>,
+    fee_check_ms: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -167,7 +174,7 @@ pub async fn enrich_launch(rpc: &Rpc, ev: LaunchEvent, recipient: Address) -> La
     let recip = if recipient == ZERO { DEAD } else { recipient };
     let (bundle, tx, pair) = tokio::join!(
         read_launch_bundle(rpc, &ev, recip),
-        read_launch_tx(rpc, &ev),
+        read_launch_tx_details(rpc, &ev, true),
         read_pair_info(rpc, ev.pair_token),
     );
     let (meta, record, curve, mut berr) = match bundle {
@@ -178,11 +185,11 @@ pub async fn enrich_launch(rpc: &Rpc, ev: LaunchEvent, recipient: Address) -> La
         }
     };
     errors.append(&mut berr);
-    let tx = match tx {
-        Ok(t) => Some(t),
+    let (tx, fee_recipient_is_contract, fee_check_ms) = match tx {
+        Ok(d) => (Some(d.tx), d.fee_recipient_is_contract, d.fee_check_ms),
         Err(e) => {
             errors.push(format!("tx: {}", first_line(&e.to_string())));
-            None
+            (None, None, 0)
         }
     };
     LaunchIntel {
@@ -193,7 +200,8 @@ pub async fn enrich_launch(rpc: &Rpc, ev: LaunchEvent, recipient: Address) -> La
         curve,
         pair,
         errors,
-        fee_recipient_is_contract: None,
+        fee_recipient_is_contract,
+        fee_check_ms,
     }
 }
 
@@ -370,12 +378,53 @@ pub async fn read_launch_bundle(
     Ok((meta, record, curve, errors))
 }
 
-pub async fn read_launch_tx(rpc: &Rpc, ev: &LaunchEvent) -> anyhow::Result<LaunchTx> {
+async fn read_launch_tx_details(
+    rpc: &Rpc,
+    ev: &LaunchEvent,
+    check_fee_recipient: bool,
+) -> anyhow::Result<LaunchTxDetails> {
     use crate::abi::{curve, router};
-    let tx = rpc.get_transaction(Lane::Enrich, ev.tx_hash).await?;
-    let receipt = rpc
-        .get_transaction_receipt(Lane::Enrich, ev.tx_hash)
-        .await?;
+    let tx_and_fee = async {
+        let tx = rpc.get_transaction(Lane::Enrich, ev.tx_hash).await?;
+        anyhow::ensure!(
+            tx.from == ev.deployer,
+            "launch tx sender does not match TokenLaunched deployer"
+        );
+        anyhow::ensure!(
+            tx.to == Some(ADDR.pons_router),
+            "launch tx target is not the pons v2 router"
+        );
+        anyhow::ensure!(
+            tx.input
+                .as_ref()
+                .starts_with(&crate::abi::selectors::launch_and_buy()),
+            "launch tx calldata is not launchAndBuy"
+        );
+        let decoded = router::launchAndBuyCall::abi_decode(&tx.input)
+            .context("decode launchAndBuy calldata")?;
+        anyhow::ensure!(
+            decoded.pairToken == ev.pair_token,
+            "launch tx pair does not match TokenLaunched"
+        );
+        anyhow::ensure!(
+            decoded.launchConfigId == ev.launch_config_id,
+            "launch config does not match TokenLaunched"
+        );
+        let fee_started = now_ms();
+        let fee_recipient_is_contract = if check_fee_recipient {
+            is_contract(rpc, decoded.params.creatorFeeRecipient)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let fee_check_ms = now_ms().saturating_sub(fee_started);
+        anyhow::Ok((tx, decoded, fee_recipient_is_contract, fee_check_ms))
+    };
+    let ((tx, decoded, fee_recipient_is_contract, fee_check_ms), receipt) = tokio::try_join!(
+        tx_and_fee,
+        rpc.get_transaction_receipt(Lane::Enrich, ev.tx_hash),
+    )?;
     anyhow::ensure!(
         receipt.tx_hash == Some(ev.tx_hash),
         "launch receipt hash does not match requested transaction"
@@ -385,30 +434,6 @@ pub async fn read_launch_tx(rpc: &Rpc, ev: &LaunchEvent) -> anyhow::Result<Launc
         Some(false) => anyhow::bail!("launch tx reverted"),
         None => anyhow::bail!("launch tx receipt has no status"),
     }
-    anyhow::ensure!(
-        tx.from == ev.deployer,
-        "launch tx sender does not match TokenLaunched deployer"
-    );
-    anyhow::ensure!(
-        tx.to == Some(ADDR.pons_router),
-        "launch tx target is not the pons v2 router"
-    );
-    anyhow::ensure!(
-        tx.input
-            .as_ref()
-            .starts_with(&crate::abi::selectors::launch_and_buy()),
-        "launch tx calldata is not launchAndBuy"
-    );
-    let decoded =
-        router::launchAndBuyCall::abi_decode(&tx.input).context("decode launchAndBuy calldata")?;
-    anyhow::ensure!(
-        decoded.pairToken == ev.pair_token,
-        "launch tx pair does not match TokenLaunched"
-    );
-    anyhow::ensure!(
-        decoded.launchConfigId == ev.launch_config_id,
-        "launch config does not match TokenLaunched"
-    );
     let mut dev_tokens = U256::ZERO;
     for log in &receipt.logs {
         if log.address() != ev.curve {
@@ -427,18 +452,26 @@ pub async fn read_launch_tx(rpc: &Rpc, ev: &LaunchEvent) -> anyhow::Result<Launc
         Some(timestamp) => timestamp,
         None => rpc.block_timestamp(Lane::Enrich, block_number).await?,
     };
-    Ok(LaunchTx {
-        from: tx.from,
-        dev_buy_wei: decoded.quoteIn,
-        dev_tokens,
-        exemptions: decoded.snipeTaxExemptions,
-        recipient: decoded.recipient,
-        timestamp,
+    Ok(LaunchTxDetails {
+        tx: LaunchTx {
+            from: tx.from,
+            dev_buy_wei: decoded.quoteIn,
+            dev_tokens,
+            exemptions: decoded.snipeTaxExemptions,
+            recipient: decoded.recipient,
+            timestamp,
+        },
+        fee_recipient_is_contract,
+        fee_check_ms,
     })
 }
 
+pub async fn read_launch_tx(rpc: &Rpc, ev: &LaunchEvent) -> anyhow::Result<LaunchTx> {
+    Ok(read_launch_tx_details(rpc, ev, false).await?.tx)
+}
+
 pub async fn is_contract(rpc: &Rpc, addr: Address) -> anyhow::Result<bool> {
-    let code = rpc.get_code(Lane::Background, addr).await?;
+    let code = rpc.get_code(Lane::Enrich, addr).await?;
     Ok(!code.is_empty())
 }
 
@@ -542,4 +575,169 @@ pub struct ReceiptView {
     pub contract_address: Option<Address>,
     pub gas_used: Option<U256>,
     pub effective_gas_price: Option<U256>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, EndpointCfg};
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    struct Mock {
+        tx: Value,
+        receipt: Value,
+        receipt_requested: AtomicBool,
+        code_saw_receipt: AtomicBool,
+        code_seen: Notify,
+    }
+
+    async fn handler(State(state): State<Arc<Mock>>, Json(req): Json<Value>) -> Json<Value> {
+        let result = match req["method"].as_str().unwrap_or_default() {
+            "eth_getTransactionByHash" => state.tx.clone(),
+            "eth_getTransactionReceipt" => {
+                state.receipt_requested.store(true, Ordering::SeqCst);
+                state.code_seen.notified().await;
+                state.receipt.clone()
+            }
+            "eth_getCode" => {
+                state.code_saw_receipt.store(
+                    state.receipt_requested.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+                state.code_seen.notify_one();
+                json!("0x6000")
+            }
+            _ => Value::Null,
+        };
+        Json(json!({"jsonrpc":"2.0","id":req["id"],"result":result}))
+    }
+
+    fn cfg(url: &str) -> Config {
+        Config {
+            rpc_http: vec![
+                EndpointCfg {
+                    url: url.into(),
+                    logs: true,
+                    label: "a".into(),
+                },
+                EndpointCfg {
+                    url: url.into(),
+                    logs: true,
+                    label: "b".into(),
+                },
+            ],
+            rpc_ws: vec![],
+            sequencer_url: "http://127.0.0.1:1".into(),
+            helper: None,
+            poll_ms: 300,
+            rpc_in_flight: 4,
+            rpc_spacing_ms: 0,
+            rpc_logs_spacing_ms: 0,
+            board_port: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn fee_check_overlaps_receipt_fetch() {
+        let deployer = Address::repeat_byte(0x11);
+        let fee_recipient = Address::repeat_byte(0x22);
+        let pair_token = Address::repeat_byte(0x33);
+        let tx_hash = B256::repeat_byte(0x44);
+        let ev = LaunchEvent {
+            token: Address::repeat_byte(0x55),
+            curve: Address::repeat_byte(0x66),
+            deployer,
+            pair_token,
+            launch_config_id: U256::from(7),
+            graduation_threshold: U256::ZERO,
+            block_number: 100,
+            tx_hash,
+            log_index: 0,
+            detected_at_ms: 0,
+            source: "unknown",
+        };
+        let input = crate::abi::router::launchAndBuyCall {
+            params: crate::abi::router::TokenParams {
+                name: "T".into(),
+                symbol: "T".into(),
+                logo: String::new(),
+                description: String::new(),
+                socials: crate::abi::router::Socials {
+                    twitter: String::new(),
+                    telegram: String::new(),
+                    discord: String::new(),
+                    website: String::new(),
+                    farcaster: String::new(),
+                },
+                creatorFeeRecipient: fee_recipient,
+                creatorTaxBps: 0,
+                buybackEnabled: false,
+                expectedEconomics: B256::ZERO,
+                salt: B256::ZERO,
+            },
+            launchConfigId: U256::from(7),
+            pairToken: pair_token,
+            quoteIn: U256::ZERO,
+            minTokensOut: U256::ZERO,
+            recipient: deployer,
+            snipeTaxExemptions: vec![],
+        }
+        .abi_encode();
+        let state = Arc::new(Mock {
+            tx: json!({
+                "from": format!("{deployer:#x}"),
+                "to": format!("{:#x}", ADDR.pons_router),
+                "value": "0x0",
+                "input": format!("0x{}", alloy::primitives::hex::encode(&input)),
+            }),
+            receipt: json!({
+                "status": "0x1",
+                "blockNumber": "0x64",
+                "blockHash": format!("{:#x}", B256::repeat_byte(0x77)),
+                "transactionHash": format!("{tx_hash:#x}"),
+                "gasUsed": "0x5208",
+                "effectiveGasPrice": "0x0",
+                "blockTimestamp": "0x65000000",
+                "logs": [],
+            }),
+            receipt_requested: AtomicBool::new(false),
+            code_saw_receipt: AtomicBool::new(false),
+            code_seen: Notify::new(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/", post(handler))
+                    .with_state(server_state),
+            )
+            .await
+            .unwrap();
+        });
+        let rpc = Rpc::new(&cfg(&format!("http://{address}"))).unwrap();
+        let details = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_launch_tx_details(&rpc, &ev, true),
+        )
+        .await
+        .expect("receipt fetch must overlap the fee check")
+        .unwrap();
+        assert_eq!(details.fee_recipient_is_contract, Some(true));
+        assert!(
+            state.code_saw_receipt.load(Ordering::SeqCst),
+            "eth_getCode must run while the receipt request is in flight"
+        );
+        assert_eq!(details.tx.from, deployer);
+        server.abort();
+    }
 }

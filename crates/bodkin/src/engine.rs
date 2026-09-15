@@ -409,6 +409,8 @@ mod tests {
                 block_number: 1,
                 tx_hash: B256::ZERO,
                 log_index: 0,
+                detected_at_ms: 0,
+                source: "unknown",
             },
             meta: Some(TokenMeta {
                 name: "test".into(),
@@ -436,6 +438,7 @@ mod tests {
             pair: PairInfo::eth(),
             errors: vec![],
             fee_recipient_is_contract: None,
+            fee_check_ms: 0,
         }
     }
 

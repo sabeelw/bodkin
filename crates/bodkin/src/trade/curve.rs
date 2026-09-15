@@ -51,6 +51,8 @@ pub async fn read_curve_state(
         block_number: 0,
         tx_hash: B256::ZERO,
         log_index: 0,
+        detected_at_ms: 0,
+        source: "unknown",
     };
     let (_, _, curve, _) = crate::pons::enrich::read_launch_bundle(rpc, &ev, rec).await?;
     curve.ok_or_else(|| anyhow::anyhow!("curve state unreadable"))

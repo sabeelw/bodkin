@@ -181,19 +181,6 @@ fn state_before(launch: &ReplayLaunch, entry_second: u64) -> Option<CurveState> 
             record.transaction_hash,
         )
     });
-    let opening_tax = records
-        .iter()
-        .copied()
-        .filter_map(|record| match &record.event {
-            FlowEvent::Tax {
-                transaction_hash,
-                amount,
-                timestamp,
-                ..
-            } if *timestamp < target => Some((*transaction_hash, *amount)),
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
     for record in records {
         match &record.event {
             FlowEvent::Buy {
@@ -201,13 +188,11 @@ fn state_before(launch: &ReplayLaunch, entry_second: u64) -> Option<CurveState> 
                 tokens_out,
                 fee,
                 tax,
-                transaction_hash,
                 ..
             } => {
-                let net = quote_in
-                    .checked_sub(*fee)?
-                    .checked_sub(*tax)?
-                    .checked_sub(*opening_tax.get(transaction_hash).unwrap_or(&U256::ZERO))?;
+                // CurveBuy.fee already carries the snipe tax; SnipeTaxCharged is
+                // informational and must not be subtracted a second time.
+                let net = quote_in.checked_sub(*fee)?.checked_sub(*tax)?;
                 state.quote_reserve = state.quote_reserve.checked_add(net)?;
                 state.real_quote_reserve = state.real_quote_reserve.checked_add(net)?;
                 state.token_reserve = state.token_reserve.checked_sub(*tokens_out)?;
@@ -662,6 +647,78 @@ mod tests {
             *quote_out = U256::from(10_000);
         }
         assert!(quoted_entry(&malformed, &rules, 2).is_none());
+    }
+
+    #[test]
+    fn snipe_tax_inside_buy_fee_is_not_subtracted_twice() {
+        let state = CurveState {
+            quote_reserve: U256::from(1_000),
+            token_reserve: U256::from(10_000),
+            sellable_tokens: U256::from(10_000),
+            real_quote_reserve: U256::from(500),
+            ..Default::default()
+        };
+        let tx = B256::from(U256::from(7));
+        // The CurveBuy fee (30) already includes the snipe tax that the paired
+        // SnipeTaxCharged event (20) only reports — subtracting it again would
+        // leave the reserve 20 short.
+        let launch = ReplayLaunch {
+            token: format!("{:#x}", Address::from([2u8; 20])),
+            curve: format!("{:#x}", Address::from([3u8; 20])),
+            launch_block: 1,
+            recorded_at: 1,
+            launched_at: 100,
+            start_bps: 9_900,
+            window: 3,
+            taxed_buyers_s1: 0,
+            exempt_buys_s0: 0,
+            gate_observed: true,
+            graduated: false,
+            outcome_observed: true,
+            provenance_complete: true,
+            run_id: Some("run".into()),
+            launch_sequence: Some(0),
+            curve_state: Some(state),
+            flow: vec![
+                FlowRecord {
+                    block_number: 1,
+                    block_hash: B256::from([1u8; 32]),
+                    transaction_index: 0,
+                    log_index: 0,
+                    transaction_hash: tx,
+                    event: FlowEvent::Buy {
+                        recipient: Address::from([1u8; 20]),
+                        quote_in: U256::from(100),
+                        tokens_out: U256::from(50),
+                        fee: U256::from(30),
+                        tax: U256::from(5),
+                        timestamp: 101,
+                        transaction_hash: tx,
+                    },
+                },
+                FlowRecord {
+                    block_number: 1,
+                    block_hash: B256::from([1u8; 32]),
+                    transaction_index: 0,
+                    log_index: 1,
+                    transaction_hash: tx,
+                    event: FlowEvent::Tax {
+                        transaction_hash: tx,
+                        recipient: Address::from([1u8; 20]),
+                        amount: U256::from(20),
+                        timestamp: 101,
+                    },
+                },
+            ],
+            intel: Some(ReplayIntel {
+                score_total: 100,
+                fire: true,
+            }),
+        };
+        let state = state_before(&launch, 2).unwrap();
+        assert_eq!(state.quote_reserve, U256::from(1_065));
+        assert_eq!(state.real_quote_reserve, U256::from(565));
+        assert_eq!(state.token_reserve, U256::from(9_950));
     }
 
     #[test]
