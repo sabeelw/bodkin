@@ -21,7 +21,7 @@ use std::collections::{HashSet, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio_stream::wrappers::BroadcastStream;
 
 const HTML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/board.html"));
@@ -35,7 +35,13 @@ struct BoardState {
     recent: Arc<parking_lot::Mutex<VecDeque<Value>>>,
     close_requests: Arc<parking_lot::Mutex<HashSet<String>>>,
     bus: broadcast::Sender<String>,
+    shutdown: watch::Sender<bool>,
     rpc: Arc<Rpc>,
+}
+
+fn begin_shutdown(st: &BoardState) {
+    st.engine.stop();
+    st.shutdown.send_replace(true);
 }
 
 pub async fn start_board(
@@ -49,6 +55,7 @@ pub async fn start_board(
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let (bus, _) = broadcast::channel::<String>(256);
+    let (shutdown, _) = watch::channel(false);
     let seen = Arc::new(AtomicU64::new(0));
     let fired = Arc::new(AtomicU64::new(0));
     let recent = Arc::new(parking_lot::Mutex::new(VecDeque::new()));
@@ -101,6 +108,7 @@ pub async fn start_board(
         recent,
         close_requests,
         bus,
+        shutdown,
         rpc,
     });
     {
@@ -134,9 +142,11 @@ pub async fn start_board(
         },
         muted("feed only until you press start")
     ));
+    let shutdown_state = st.clone();
     let served = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            begin_shutdown(&shutdown_state);
         })
         .await;
     st.engine.shutdown().await;
@@ -266,6 +276,7 @@ async fn events(
     State(st): State<Arc<BoardState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = st.bus.subscribe();
+    let mut shutdown = st.shutdown.subscribe();
     let initial = hello(&st).await;
     let mut recent = {
         let q = st.recent.lock();
@@ -309,7 +320,15 @@ async fn events(
             Some(Ok(Event::default().data(line)))
         }
     });
-    Sse::new(futures_util::stream::iter(prelude).chain(live)).keep_alive(KeepAlive::default())
+    let stream = futures_util::stream::iter(prelude)
+        .chain(live)
+        .take_until(async move {
+            let already_shutting_down = *shutdown.borrow();
+            if !already_shutting_down {
+                let _ = shutdown.changed().await;
+            }
+        });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 async fn state(State(st): State<Arc<BoardState>>) -> impl IntoResponse {
@@ -493,7 +512,8 @@ fn positions_view(st: &BoardState) -> Value {
                 let exit_gas = p.exit_gas();
                 let pnl = p.net_pnl_pct(last);
                 json!({
-                    "id": p.id, "token": format!("{:#x}", p.token), "symbol": p.symbol,
+                    "id": p.id, "token": format!("{:#x}", p.token),
+                    "curve": format!("{:#x}", p.curve), "name": p.name, "symbol": p.symbol,
                     "ethIn": p.entry_eth, "held": p.tokens, "status": p.status,
                     "pnl": pnl, "dryRun": p.dry_run, "openedAt": p.opened_at * 1000,
                     "closing": is_closing,
@@ -736,6 +756,7 @@ mod tests {
         let now = now_ms();
         engine.clock().note_header(now / 1_000, now, 1, 1);
         let (bus, _) = broadcast::channel(8);
+        let (shutdown, _) = watch::channel(false);
         let state = Arc::new(BoardState {
             engine,
             live: false,
@@ -745,6 +766,7 @@ mod tests {
             recent: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             close_requests: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             bus,
+            shutdown,
             rpc: Arc::new(Rpc::new(&config()).unwrap()),
         });
         let app = board_router(state.clone(), PORT);
@@ -766,6 +788,15 @@ mod tests {
         assert_eq!(first_state["positions"], second_state["positions"]);
         assert_eq!(first_state["seen"], second_state["seen"]);
         assert_eq!(first_state["positions"][0]["closing"], false);
+        assert_eq!(
+            first_state["positions"][0]["token"],
+            json!(format!("{:#x}", position.token))
+        );
+        assert_eq!(
+            first_state["positions"][0]["curve"],
+            json!(format!("{:#x}", position.curve))
+        );
+        assert_eq!(first_state["positions"][0]["name"], "x");
 
         let path = format!("/api/close/{}", position.id);
         let first = json_body(
@@ -845,6 +876,25 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
         }
         assert!(!state.engine.paused());
+
+        let response = app.oneshot(request(Method::GET, "/events")).await.unwrap();
+        let mut shutdown_body = response.into_body().into_data_stream();
+        let hello = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            futures_util::StreamExt::next(&mut shutdown_body),
+        )
+        .await
+        .unwrap();
+        assert!(hello.is_some());
+        begin_shutdown(&state);
+        assert!(state.engine.stopped());
+        let end = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            futures_util::StreamExt::next(&mut shutdown_body),
+        )
+        .await
+        .expect("SSE stream stayed open during board shutdown");
+        assert!(end.is_none());
         state.engine.shutdown().await;
     }
 }

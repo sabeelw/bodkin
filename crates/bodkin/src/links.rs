@@ -14,7 +14,7 @@ impl Links {
     }
 
     pub fn pons(token: &str) -> String {
-        format!("https://www.ponsfamily.com/token/{token}")
+        format!("https://www.ponsfamily.com/launchpad/{token}")
     }
     pub fn explorer(token: &str) -> String {
         format!("https://robinhoodchain.blockscout.com/token/{token}")

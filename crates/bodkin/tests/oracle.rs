@@ -605,7 +605,7 @@ fn axiom_keyed_by_curve() {
     );
     assert_eq!(
         Links::pons(token),
-        format!("https://www.ponsfamily.com/token/{token}")
+        format!("https://www.ponsfamily.com/launchpad/{token}")
     );
 }
 
