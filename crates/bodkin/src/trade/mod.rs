@@ -4,6 +4,7 @@ pub mod exec;
 pub mod journal;
 pub mod pool;
 pub mod positions;
+pub mod scheduler;
 pub mod state;
 pub mod submitter;
 pub mod v4;

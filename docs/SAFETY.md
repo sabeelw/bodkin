@@ -12,6 +12,8 @@
 `snipe`, `buy`, `sell`, `claim` and `board` quote and log without sending unless you pass `--live`. Dry `snipe` accepts a paper entry only when it captured canonical curve state during second +1 or +2, then applies the configured +2 tax. Marks and exits use the live chain without injecting the hypothetical buy's reserve impact, so dry PnL is useful for rejecting a strategy but cannot prove exact live profitability. The board goes one step
 further: even in dry run it opens as a feed and fires nothing until you press start.
 
+`board --research --data-dir <separate-dir>` remains no-send and cannot be combined with `--live`. It uses a persistent 0.05 ETH modeled ledger, limits each entry plus modeled attempt gas to 2% of current known equity, reserves modeled exit gas, reuses only settled proceeds, and attempts full modeled liquidation after a 10% peak-to-trough drawdown. Unknown liquidation value stops admissions and prevents a risk-pass claim. The threshold cannot guarantee a 10% loss ceiling when liquidity or quotes disappear, and paper reserve impact is still approximate.
+
 ## Four walls around a live session
 
 1. **The confirmation.** `--live` prints the signer, balance, buy size, worst-case burst-gas reservation, position cap, and session budget. It refuses unless balance and budget cover one buy plus that gas reserve, then waits for `arm`; the live board also needs its button.
@@ -39,7 +41,7 @@ Start with a fresh wallet holding the budget and nothing else. Raise the numbers
 
 It listens on 127.0.0.1 only. It can pause and resume firing, close an open position at the current quote, and change five numeric rules
 inside fixed bounds. It cannot buy on demand and cannot switch a dry run to live: `--live` is decided when you start it. Anyone on your
-machine can open it; nobody outside can. Start/resume refuses while the chain clock is stale or unstable, close retries are idempotent, and an SSE lag forces a fresh authoritative snapshot. If several people share the machine, start it with a different `--port` and assume they can click.
+machine can open it; nobody outside can. Start/resume refuses while the chain clock is stale or unstable; research start also refuses after valuation uncertainty or a drawdown latch. Close retries are idempotent, and an SSE lag forces a fresh authoritative snapshot. If several people share the machine, start it with a different `--port` and assume they can click.
 
 ## Fees and taxes you pay on every trade
 

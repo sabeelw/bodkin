@@ -1,8 +1,9 @@
+use super::scheduler::EntryDeadline;
 use super::submitter::{SendOutcome, Submitter};
 use super::wallet::Wallet;
 use crate::pons::clock::ChainClock;
-use crate::pons::tax::boundary_instant;
 use alloy::primitives::{Address, B256, Bytes, U256};
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -16,6 +17,7 @@ pub enum BurstClass {
     NonceGap,
     /// The armed flag went false between signing and the fire instant.
     Aborted,
+    Expired,
     ShadowWouldLand,
 }
 
@@ -26,6 +28,13 @@ pub struct SignedTx {
     pub raw: Bytes,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BurstTiming {
+    pub first_response_ms: Option<u64>,
+    pub first_useful_ms: Option<u64>,
+    pub all_responses_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct BurstResult {
     pub class: BurstClass,
@@ -33,6 +42,7 @@ pub struct BurstResult {
     pub attempt: usize,
     pub message: String,
     pub outcomes: Vec<(usize, SendOutcome)>,
+    pub timing: BurstTiming,
 }
 
 pub struct BurstCtl {
@@ -104,66 +114,82 @@ pub async fn fire_burst(sub: &Submitter, txs: &[SignedTx], spray_first: bool) ->
             attempt: 0,
             message: "empty burst".into(),
             outcomes: Vec::new(),
+            timing: BurstTiming::default(),
         };
     }
     let t0 = Instant::now();
-    let mut futs = Vec::new();
-    for (i, tx) in txs.iter().enumerate() {
-        if i == 0 && spray_first {
-            futs.push(futures_util::future::Either::Left(async move {
-                (0usize, sub.spray(&tx.raw).await)
-            }));
-        } else {
-            let raw = tx.raw.clone();
-            futs.push(futures_util::future::Either::Right(async move {
-                (i, sub.send_raw(&raw).await)
-            }));
-        }
+    let mut futures = FuturesUnordered::new();
+    for (index, tx) in txs.iter().enumerate() {
+        let raw = tx.raw.clone();
+        futures.push(async move {
+            let outcome = if index == 0 && spray_first {
+                sub.spray(&raw).await
+            } else {
+                sub.send_raw(&raw).await
+            };
+            (index, outcome)
+        });
     }
-    let results = futures_util::future::join_all(futs).await;
-    let outcomes = results.clone();
+    let mut outcomes = Vec::with_capacity(txs.len());
+    let mut timing = BurstTiming::default();
+    while let Some((index, outcome)) = futures.next().await {
+        let elapsed = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+        timing.first_response_ms.get_or_insert(elapsed);
+        if !matches!(outcome, SendOutcome::Error(_)) {
+            timing.first_useful_ms.get_or_insert(elapsed);
+        }
+        outcomes.push((index, outcome));
+    }
+    timing.all_responses_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+    outcomes.sort_by_key(|(index, _)| *index);
     // Prefer an accepted hash over a later-indexed revert/dup: an accepted send
     // is the only outcome worth reconciling against a receipt.
     let mut first_revert: Option<(usize, SendOutcome)> = None;
     let mut first_known: Option<usize> = None;
-    for (i, out) in results {
-        match out {
-            SendOutcome::Hash(h) => {
+    for (index, outcome) in outcomes.iter().cloned() {
+        match outcome {
+            SendOutcome::Hash(hash) => {
                 return BurstResult {
                     class: BurstClass::Submitted,
-                    hash: Some(h),
-                    attempt: i,
-                    message: format!("submitted attempt {i} in {} ms", t0.elapsed().as_millis()),
+                    hash: Some(hash),
+                    attempt: index,
+                    message: format!(
+                        "submitted attempt {index} in {} ms",
+                        timing.all_responses_ms
+                    ),
                     outcomes,
+                    timing,
                 };
             }
             SendOutcome::Revert { .. } => {
                 if first_revert.is_none() {
-                    first_revert = Some((i, out));
+                    first_revert = Some((index, outcome));
                 }
             }
             SendOutcome::Known if first_known.is_none() => {
-                first_known = Some(i);
+                first_known = Some(index);
             }
             _ => {}
         }
     }
-    if let Some(i) = first_known {
+    if let Some(index) = first_known {
         return BurstResult {
             class: BurstClass::LateDup,
-            hash: Some(txs[i].hash),
-            attempt: i,
+            hash: Some(txs[index].hash),
+            attempt: index,
             message: "already known".into(),
             outcomes,
+            timing,
         };
     }
-    if let Some((i, SendOutcome::Revert { message })) = first_revert {
+    if let Some((index, SendOutcome::Revert { message })) = first_revert {
         return BurstResult {
             class: BurstClass::HelperRevert,
             hash: None,
-            attempt: i,
+            attempt: index,
             message,
             outcomes,
+            timing,
         };
     }
     BurstResult {
@@ -172,40 +198,55 @@ pub async fn fire_burst(sub: &Submitter, txs: &[SignedTx], spray_first: bool) ->
         attempt: 0,
         message: "no inclusion".into(),
         outcomes,
+        timing,
     }
 }
 
-/// Sleep until `launched_at + entry_second` minus lead (in chain time), then
-/// fire. `armed` is re-checked after the sleep so a pause during the wait
-/// aborts before send.
+/// Sleep until the typed entry deadline's dispatch instant, then fire.
+/// `armed` is re-checked after the sleep so a pause during the wait aborts
+/// before send.
 pub async fn clock_fire(
     clock: &ChainClock,
-    launched_at: u64,
-    entry_second: u64,
-    lead_ms: u64,
+    deadline: EntryDeadline,
     sub: &Submitter,
     txs: &[SignedTx],
-    armed: Option<&std::sync::atomic::AtomicBool>,
+    armed: Option<&AtomicBool>,
 ) -> BurstResult {
-    let boundary = boundary_instant(launched_at, entry_second);
-    let target = boundary.saturating_mul(1000).saturating_sub(lead_ms);
-    let now_chain = clock.chain_now_ms();
-    if (target as i64) > now_chain {
-        tokio::time::sleep(std::time::Duration::from_millis(
-            (target as i64 - now_chain) as u64,
-        ))
-        .await;
+    if !deadline.preparation_open(clock.chain_now_ms()) {
+        return empty_result(
+            BurstClass::Expired,
+            "entry preparation missed dispatch cutoff",
+        );
     }
+    let target = match deadline.dispatch_instant(clock) {
+        Ok(target) => target,
+        Err(error) => return empty_result(BurstClass::Expired, error.to_string()),
+    };
+    tokio::time::sleep_until(tokio::time::Instant::from_std(target)).await;
     if is_paused(armed) || clock.require_quality(2_000, 1_500).is_err() {
-        return BurstResult {
-            class: BurstClass::Aborted,
-            hash: None,
-            attempt: 0,
-            message: "paused or chain clock became unhealthy before send".into(),
-            outcomes: Vec::new(),
-        };
+        return empty_result(
+            BurstClass::Aborted,
+            "paused or chain clock became unhealthy before send",
+        );
+    }
+    if !deadline.dispatch_open(clock.chain_now_ms()) {
+        return empty_result(
+            BurstClass::Expired,
+            "entry scheduler missed dispatch tolerance",
+        );
     }
     fire_burst(sub, txs, true).await
+}
+
+fn empty_result(class: BurstClass, message: impl Into<String>) -> BurstResult {
+    BurstResult {
+        class,
+        hash: None,
+        attempt: 0,
+        message: message.into(),
+        outcomes: Vec::new(),
+        timing: BurstTiming::default(),
+    }
 }
 
 fn is_paused(flag: Option<&AtomicBool>) -> bool {
@@ -223,6 +264,7 @@ pub fn shadow_result(launched_at: u64, entry_second: u64) -> BurstResult {
             launched_at + entry_second
         ),
         outcomes: Vec::new(),
+        timing: BurstTiming::default(),
     }
 }
 

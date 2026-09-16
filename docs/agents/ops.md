@@ -49,6 +49,9 @@ bodkin helper deploy --live
 bodkin helper check
 bodkin outcomes
 bodkin replay --hours 6         # needs captured launch snapshots and RPC logs; never invents missing data
+bodkin capture --for 86400 --max-bytes 1073741824 --output capture-1
+bodkin replay --research --dataset capture-1
+bodkin board --research --data-dir research-board-1
 ```
 
 `--yes` skips `arm` (systemd only, after you have armed by hand once).
@@ -57,7 +60,7 @@ bodkin replay --hours 6         # needs captured launch snapshots and RPC logs; 
 
 ## Board check
 
-Engine starts **stopped**. Launches still score. Firing begins on **start demo** (dry) or **arm live sniping** (`--live`).
+Engine starts **stopped**. Launches still score. Firing begins on **start demo** (dry), **start research** (`--research`, isolated modeled ledger), or **arm live sniping** (`--live`). Research cannot share/alias `data/`, cannot combine with live, and a valuation/drawdown latch cannot be reset from the page.
 
 ```sh
 curl -s http://127.0.0.1:4663/api/state | python3 -m json.tool

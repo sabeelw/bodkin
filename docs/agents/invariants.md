@@ -25,7 +25,7 @@ Public RPC pair (default when `RPC_URL` is empty):
 - publicnode — state reads, refuses `eth_getLogs` (`#nologs`)
 - official Robinhood RPC — logs, 429s bursts
 
-One gate, no JSON-RPC batches. Lanes: hot > enrich > background. Queue depth is cancellation-safe, permits cover body reads, launch and control queues are bounded, and HDR p50/p95/p99 latency is observable.
+One gate, no JSON-RPC batches. Lanes: hot > enrich > background. Queue depth and pacing are cancellation-safe, permits cover body reads, launch and control queues are bounded, and HDR p50/p95/p99 latency is observable. Deadline cancellation must not reserve an unused future request slot.
 
 ## Opening tax
 
@@ -66,7 +66,7 @@ Socials: X **+8**, website **+8**, telegram **+8**. Do not also hard-refuse soci
 
 Fee recipient is a contract: **−8**, only when `eth_getCode` was actually looked up (`ScoreContext.fee_recipient_is_contract`). `None` means “not looked up”, not “EOA”.
 
-Deployer window: **~2 days (~1.73M blocks)**, not 11 hours. Built on the background lane at startup.
+Deployer window: **~2 days (~1.73M blocks)**, not 11 hours. Launch and graduation scans share one canonical range; readiness is fail-closed. The checkpoint is reusable only after its chain/factory/range anchor is reverified.
 
 Fingerprint: same dev-buy wei, creator tax, links, **exemption count** from another wallet inside 30 minutes.
 
@@ -109,7 +109,12 @@ Marks are a real sell quote for the **whole** position (curve `quoteSell` or `V4
 - Conditional `blockNumberMin/Max` are **L1**. `timestampMin` is L2 Unix seconds. Default TxPreChecker compares to the **last sealed** header, so `timestampMin = launchedAt+2` is late by one ~100 ms block. Conditional is reject-not-wait. Park on it only if `doctor --probe` shows immediate `-32003`.
 - Helper reverts **pay gas** (Nitro `max-revert-gas-reject` default 0). Clock lead stays tight.
 - Build and warm one persistent `ClientBuilder::resolve` client per sequencer IP so SNI/`Host` stay official. The sequencer is write-only, so a well-formed JSON-RPC error to the harmless `eth_chainId` warm-up still proves the pinned HTTP path. Spray **nonce 0** across the pinned set, reuse those clients for later attempts, and re-resolve every 5 minutes.
-- Pre-sign `BURST_MAX` consecutive nonces. Fire in parallel. Default lead 150 ms. Receipt hash/status/block hash/logs/gas fields are strict; the canonical block hash is checked immediately, for 64 blocks on startup, and every ten seconds while live.
+- Pre-sign `BURST_MAX` consecutive nonces. Fire in parallel. Default lead 150 ms. Preparation that misses the dispatch cutoff is skipped; only scheduler wake-up has a 25 ms tolerance. Receipt hash/status/block hash/logs/gas fields are strict; the canonical block hash is checked immediately, for 64 blocks on startup, and every ten seconds while live. Lead adaptation uses the actual unique filling attempt and does nothing when first-block classification is unknown.
+- One execution scheduler owns nonce-affecting work. Manual, insider and research-risk liquidation are emergency class; deadline entry follows; fresh routine exits may be deferred for at most 100 ms. Already submitted work is never preempted before reconciliation and durable application.
+
+## Research isolation
+
+`capture` is read-only, constructs no wallet/submitter, and is capped at 24 hours / 1 GiB including its manifest. `board --research` requires an explicit path outside/unaliasing normal `data/` and is incompatible with `--live`. The default persistent research ledger is 0.05 ETH equity, 2% entry commitment including modeled entry-attempt gas, three open positions, realized-proceeds reuse, and a 10% peak drawdown liquidation latch. Missing liquidation value halts admission; it is never zero-filled.
 
 ## Feed
 

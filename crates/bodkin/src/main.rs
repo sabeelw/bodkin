@@ -9,14 +9,21 @@ use bodkin::engine::{SnipeRules, try_rules_from_env};
 use bodkin::fmt::{clean_text, eth, first_line, hhmmss, iso, pad, short, usd};
 use bodkin::links::{Links, ref_line};
 use bodkin::outcomes::{OutcomeLog, print_summary, summarize};
-use bodkin::pons::deployer::DeployerIndex;
+use bodkin::pons::deployer::{DeployerIndex, HistoryCoverage};
 use bodkin::pons::enrich::{enrich_launch, read_token_meta};
 use bodkin::pons::fees::fee_forensics;
 use bodkin::pons::fingerprint::FarmDetector;
-use bodkin::pons::launches::{FeedHealth, find_launch, recent_launches, watch_launches};
+use bodkin::pons::launches::{
+    FeedHealth, LaunchEvent, find_launch, graduations_in_range, launches_in_range, recent_launches,
+    watch_launches,
+};
 use bodkin::pons::tax::snipe_tax_bps;
+use bodkin::research::{
+    CanonicalObservation, CaptureLimits, CaptureRecordStatus, CaptureStopReason, ResearchEventKind,
+    ResearchProfile, ResearchRecorder,
+};
 use bodkin::rpc::{Lane, Rpc};
-use bodkin::run::start_engine;
+use bodkin::run::{EngineOptions, start_engine};
 use bodkin::score::{ScoreContext, score_launch};
 use bodkin::style::{banner, error, hr, info, loss, muted, neon, on_neon, warn, white};
 use bodkin::trade::burst::BurstCtl;
@@ -29,6 +36,8 @@ use bodkin::trade::v4::{detect_router_layout, pool_key_for, pool_liquidity, quot
 use bodkin::trade::wallet::Wallet;
 use bodkin::view::{ViewCtx, launch_card, launch_update};
 use clap::{Parser, Subcommand};
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -143,6 +152,10 @@ enum Cmd {
         port: Option<u16>,
         #[arg(long)]
         live: bool,
+        #[arg(long)]
+        research: bool,
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<PathBuf>,
         #[arg(long, value_parser = parse_ether)]
         eth: Option<U256>,
         #[arg(long)]
@@ -160,6 +173,14 @@ enum Cmd {
     Helper(HelperCmd),
     /// Print outcomes.jsonl summary
     Outcomes,
+    Capture {
+        #[arg(long, default_value = "86400")]
+        r#for: u64,
+        #[arg(long, default_value = "1073741824")]
+        max_bytes: u64,
+        #[arg(long, value_name = "DIR")]
+        output: PathBuf,
+    },
     /// Replay sampled launches against alternate rules
     Replay {
         #[arg(long, default_value = "6")]
@@ -168,6 +189,10 @@ enum Cmd {
         sample: Option<u64>,
         #[arg(long, default_value = "2")]
         entry_second: u64,
+        #[arg(long, value_name = "DIR")]
+        dataset: Option<PathBuf>,
+        #[arg(long)]
+        research: bool,
     },
 }
 
@@ -305,6 +330,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Board {
             port,
             live,
+            research,
+            data_dir,
             eth,
             min_score,
             keyword,
@@ -312,6 +339,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             budget,
             yes,
         } => {
+            anyhow::ensure!(
+                !(research && live),
+                "--research cannot be combined with --live"
+            );
+            anyhow::ensure!(
+                research || data_dir.is_none(),
+                "--data-dir requires --research"
+            );
             let rules = snipe_rules(
                 eth,
                 min_score,
@@ -328,7 +363,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 arm_live(&rpc, &cfg, &rules, yes).await?;
             }
             let port = port.unwrap_or(cfg.board_port);
-            bodkin::board::start_board(rpc, cfg, port, live, rules).await
+            if research {
+                let data_dir = data_dir
+                    .ok_or_else(|| anyhow::anyhow!("--research requires an explicit --data-dir"))?;
+                let options = EngineOptions::research(ResearchProfile::default(), data_dir)?;
+                bodkin::board::start_board_with_options(rpc, cfg, port, rules, options).await
+            } else {
+                bodkin::board::start_board(rpc, cfg, port, live, rules).await
+            }
         }
         Cmd::Helper(HelperCmd::Deploy { live }) => helper_deploy(rpc, &cfg, live).await,
         Cmd::Helper(HelperCmd::Check) => helper_check(rpc, &cfg).await,
@@ -337,11 +379,32 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             print_summary(&summarize(&evs));
             Ok(())
         }
+        Cmd::Capture {
+            r#for,
+            max_bytes,
+            output,
+        } => capture_cmd(rpc, cfg, r#for, max_bytes, output).await,
         Cmd::Replay {
             hours,
             sample,
             entry_second,
-        } => replay_cmd(rpc, hours, sample, entry_second).await,
+            dataset,
+            research,
+        } => {
+            anyhow::ensure!(
+                research || dataset.is_none(),
+                "--dataset requires --research"
+            );
+            if research {
+                let dataset =
+                    dataset.ok_or_else(|| anyhow::anyhow!("--research requires --dataset"))?;
+                let report = bodkin::replay::research_dataset_report(dataset)?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                Ok(())
+            } else {
+                replay_cmd(rpc, hours, sample, entry_second).await
+            }
+        }
     }
 }
 
@@ -746,12 +809,41 @@ async fn hunt(
         let rpc = rpc.clone();
         let index = index.clone();
         tokio::spawn(async move {
-            if let Ok(evs) = recent_launches(&rpc, 1_728_000, None, None).await {
-                let mut idx = index.lock().await;
-                for e in &evs {
-                    idx.note(e);
+            index.lock().await.begin_history();
+            let scanned = async {
+                let head = rpc.block_number(Lane::Background).await?;
+                let from = head.saturating_sub(1_728_000);
+                let anchor = rpc.block_hash(Lane::Background, head).await?;
+                let events = launches_in_range(&rpc, from, head, None, None).await?;
+                let graduations = graduations_in_range(&rpc, from, head).await?;
+                anyhow::ensure!(
+                    rpc.block_hash(Lane::Background, head).await? == anchor,
+                    "deployer history anchor changed during scan"
+                );
+                anyhow::Ok((head, from, anchor, events, graduations))
+            }
+            .await;
+            match scanned {
+                Ok((head, from, anchor, events, graduations)) => {
+                    let mut idx = index.lock().await;
+                    for event in &events {
+                        idx.note(event);
+                    }
+                    for (token, block) in graduations {
+                        idx.mark_graduated(token, block);
+                    }
+                    idx.mark_ready(HistoryCoverage {
+                        chain_id: CHAIN_ID,
+                        factory: ADDR.pons_factory,
+                        from_block: from,
+                        to_block: head,
+                        anchor,
+                    });
                 }
-                idx.mark_ready();
+                Err(error) => index
+                    .lock()
+                    .await
+                    .mark_failed(first_line(&error.to_string())),
             }
         })
     };
@@ -1570,6 +1662,290 @@ fn helper_bytecode() -> anyhow::Result<alloy::primitives::Bytes> {
     anyhow::bail!("no BodkinBuyOnce bytecode (run `forge build` in contracts/)")
 }
 
+struct PendingCapture {
+    due: tokio::time::Instant,
+    event: LaunchEvent,
+    launched_at: u64,
+    insiders: Vec<Address>,
+}
+
+struct FollowCapture {
+    canonical: CanonicalObservation,
+    data: serde_json::Value,
+}
+
+async fn capture_cmd(
+    rpc: Arc<Rpc>,
+    cfg: Config,
+    duration_seconds: u64,
+    max_bytes: u64,
+    output: PathBuf,
+) -> anyhow::Result<()> {
+    let _isolation = EngineOptions::research(ResearchProfile::default(), output.clone())?;
+    let limits = CaptureLimits {
+        duration_seconds,
+        max_bytes,
+    }
+    .validate()?;
+    let mut recorder = ResearchRecorder::create(output, limits)?;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1_024);
+    let health = Arc::new(parking_lot::Mutex::new(FeedHealth::default()));
+    let watch = watch_launches(rpc.clone(), cfg, tx, health);
+    let deadline = tokio::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(duration_seconds))
+        .ok_or_else(|| anyhow::anyhow!("capture deadline overflows monotonic time"))?;
+    let follow_limit = Arc::new(tokio::sync::Semaphore::new(4));
+    let mut pending = VecDeque::<PendingCapture>::new();
+    let mut followers = tokio::task::JoinSet::new();
+    let stop_reason = 'capture: loop {
+        let next_due = pending.front().map(|item| item.due);
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break CaptureStopReason::Requested,
+            _ = tokio::time::sleep_until(deadline) => break CaptureStopReason::DurationLimit,
+            _ = async {
+                if let Some(due) = next_due {
+                    tokio::time::sleep_until(due).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                let Some(item) = pending.pop_front() else { continue };
+                let rpc = rpc.clone();
+                let follow_limit = follow_limit.clone();
+                followers.spawn(async move {
+                    let token = item.event.token;
+                    let permit = follow_limit.acquire_owned().await;
+                    let result = match permit {
+                        Ok(_permit) => capture_follow(&rpc, item).await,
+                        Err(error) => Err(anyhow::anyhow!(error)),
+                    };
+                    (token, result)
+                });
+            }
+            Some(result) = followers.join_next(), if !followers.is_empty() => {
+                match result {
+                    Ok((_token, Ok(follow))) => {
+                        if let CaptureRecordStatus::Stopped(manifest) = recorder.record(
+                            ResearchEventKind::Flow,
+                            Some(follow.canonical),
+                            follow.data,
+                        )? {
+                            break 'capture manifest.stop_reason;
+                        }
+                    }
+                    Ok((token, Err(error))) => {
+                        if let CaptureRecordStatus::Stopped(manifest) = recorder.record(
+                            ResearchEventKind::Missing,
+                            None,
+                            serde_json::json!({
+                                "token":format!("{token:#x}"),
+                                "stage":"follow_up",
+                                "error":first_line(&error.to_string()),
+                            }),
+                        )? {
+                            break 'capture manifest.stop_reason;
+                        }
+                    }
+                    Err(error) => {
+                        if let CaptureRecordStatus::Stopped(manifest) = recorder.record(
+                            ResearchEventKind::Missing,
+                            None,
+                            serde_json::json!({
+                                "stage":"follow_task",
+                                "error":first_line(&error.to_string()),
+                            }),
+                        )? {
+                            break 'capture manifest.stop_reason;
+                        }
+                    }
+                }
+            }
+            event = rx.recv() => {
+                let Some(event) = event else {
+                    break CaptureStopReason::SourceClosed;
+                };
+                let canonical = canonical_observation(&rpc, event.block_number).await.ok();
+                let intel = enrich_launch(&rpc, event.clone(), bodkin::chain::DEAD).await;
+                let launched_at = intel
+                    .curve
+                    .as_ref()
+                    .map(|curve| curve.launched_at)
+                    .or_else(|| intel.tx.as_ref().map(|transaction| transaction.timestamp))
+                    .unwrap_or(0);
+                let insiders = capture_insiders(&intel);
+                if let CaptureRecordStatus::Stopped(manifest) = recorder.record(
+                    ResearchEventKind::Launch,
+                    canonical,
+                    capture_launch_data(&intel),
+                )? {
+                    break manifest.stop_reason;
+                }
+                let now_seconds = bodkin::pons::clock::now_ms() / 1_000;
+                let wait_seconds = launched_at
+                    .saturating_add(3_600)
+                    .saturating_sub(now_seconds);
+                pending.push_back(PendingCapture {
+                    due: tokio::time::Instant::now()
+                        + std::time::Duration::from_secs(wait_seconds),
+                    event,
+                    launched_at,
+                    insiders,
+                });
+            }
+        }
+    };
+    watch.shutdown().await;
+    followers.abort_all();
+    while followers.join_next().await.is_some() {}
+    let manifest = recorder.finish(stop_reason)?;
+    info(format!("capture {}", serde_json::to_string(&manifest)?));
+    Ok(())
+}
+
+async fn canonical_observation(rpc: &Rpc, block: u64) -> anyhow::Result<CanonicalObservation> {
+    let (block_hash, block_timestamp) = tokio::try_join!(
+        rpc.block_hash(Lane::Background, block),
+        rpc.block_timestamp(Lane::Background, block),
+    )?;
+    Ok(CanonicalObservation {
+        block_number: block,
+        block_hash,
+        block_timestamp,
+    })
+}
+
+fn capture_insiders(intel: &bodkin::pons::enrich::LaunchIntel) -> Vec<Address> {
+    let mut insiders = intel
+        .tx
+        .as_ref()
+        .map(|transaction| transaction.exemptions.clone())
+        .unwrap_or_default();
+    insiders.push(intel.ev.deployer);
+    if let Some(transaction) = &intel.tx {
+        insiders.push(transaction.recipient);
+    }
+    if let Some(record) = &intel.record {
+        insiders.push(record.creator_fee_recipient);
+    }
+    insiders
+}
+
+fn capture_launch_data(intel: &bodkin::pons::enrich::LaunchIntel) -> serde_json::Value {
+    serde_json::json!({
+        "token":format!("{:#x}",intel.ev.token),
+        "curve":format!("{:#x}",intel.ev.curve),
+        "deployer":format!("{:#x}",intel.ev.deployer),
+        "pair_token":format!("{:#x}",intel.ev.pair_token),
+        "launch_config_id":intel.ev.launch_config_id.to_string(),
+        "graduation_threshold":intel.ev.graduation_threshold.to_string(),
+        "launch_block":intel.ev.block_number,
+        "tx_hash":format!("{:#x}",intel.ev.tx_hash),
+        "log_index":intel.ev.log_index,
+        "detected_at_ms":intel.ev.detected_at_ms,
+        "source":intel.ev.source,
+        "meta":intel.meta.as_ref().map(|meta| serde_json::json!({
+            "name":meta.name,
+            "symbol":meta.symbol,
+            "description":meta.description,
+            "socials":{
+                "twitter":meta.socials.twitter,
+                "telegram":meta.socials.telegram,
+                "website":meta.socials.website,
+            },
+        })),
+        "record":intel.record.as_ref().map(|record| serde_json::json!({
+            "creator_fee_recipient":format!("{:#x}",record.creator_fee_recipient),
+            "creator_tax_bps":record.creator_tax_bps,
+            "phase":record.phase,
+        })),
+        "transaction":intel.tx.as_ref().map(|transaction| serde_json::json!({
+            "from":format!("{:#x}",transaction.from),
+            "dev_buy_wei":transaction.dev_buy_wei.to_string(),
+            "dev_tokens":transaction.dev_tokens.to_string(),
+            "exemptions":transaction.exemptions.iter().map(|address| format!("{address:#x}")).collect::<Vec<_>>(),
+            "recipient":format!("{:#x}",transaction.recipient),
+            "timestamp":transaction.timestamp,
+        })),
+        "curve_state":intel.curve,
+        "pair":{
+            "address":format!("{:#x}",intel.pair.address),
+            "symbol":intel.pair.symbol,
+            "decimals":intel.pair.decimals,
+            "usd_per_unit":intel.pair.usd_per_unit,
+        },
+        "fee_recipient_is_contract":intel.fee_recipient_is_contract,
+        "fee_check_ms":intel.fee_check_ms,
+        "errors":intel.errors,
+    })
+}
+
+async fn capture_follow(rpc: &Rpc, item: PendingCapture) -> anyhow::Result<FollowCapture> {
+    let head = rpc.block_number(Lane::Background).await?;
+    anyhow::ensure!(
+        head >= item.event.block_number,
+        "follow-up head precedes launch block"
+    );
+    let canonical = canonical_observation(rpc, head).await?;
+    let logs = bodkin::pons::stream::fetch_curve_logs_on(
+        rpc,
+        Lane::Background,
+        item.event.curve,
+        item.event.block_number,
+        head,
+    )
+    .await?;
+    let mut tracker = bodkin::pons::stream::FlowTracker::default();
+    tracker.watch(
+        item.event.curve,
+        item.launched_at,
+        item.event.block_number,
+        item.insiders,
+    );
+    tracker.apply_range(
+        item.event.curve,
+        item.event.block_number,
+        head,
+        canonical.block_hash,
+        &logs,
+    )?;
+    let graduation_filter = alloy::rpc::types::Filter::new()
+        .address(ADDR.pons_factory)
+        .event_signature(bodkin::abi::topics::pool_graduated())
+        .topic1(alloy::primitives::B256::left_padding_from(
+            item.event.token.as_slice(),
+        ))
+        .from_block(item.event.block_number)
+        .to_block(head);
+    let graduation_logs = rpc.get_logs(Lane::Background, graduation_filter).await?;
+    let snapshot = tracker.snapshot(item.event.curve);
+    Ok(FollowCapture {
+        canonical,
+        data: serde_json::json!({
+            "token":format!("{:#x}",item.event.token),
+            "curve":format!("{:#x}",item.event.curve),
+            "from_block":item.event.block_number,
+            "to_block":head,
+            "launched_at":item.launched_at,
+            "horizon_seconds":3_600,
+            "records":tracker.records(item.event.curve),
+            "snapshot":{
+                "taxed_buyers_s1":snapshot.taxed_buyers_s1,
+                "exempt_buys_s0":snapshot.exempt_buys_s0,
+                "insider_sold":snapshot.insider_sold,
+                "ready_to_graduate":snapshot.ready_to_graduate,
+                "buys":snapshot.buys,
+                "sells":snapshot.sells,
+                "unique_buyers":snapshot.unique_buyers,
+                "quote_in":snapshot.quote_in.to_string(),
+                "quote_out":snapshot.quote_out.to_string(),
+                "last_non_insider_buy_at":snapshot.last_non_insider_buy_at,
+            },
+            "graduated":!graduation_logs.is_empty(),
+            "coverage_complete":true,
+        }),
+    })
+}
+
 async fn replay_cmd(
     rpc: Arc<Rpc>,
     hours: u64,
@@ -1610,6 +1986,62 @@ async fn replay_cmd(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_and_capture_cli_options_parse() {
+        let capture = Cli::try_parse_from([
+            "bodkin",
+            "capture",
+            "--for",
+            "60",
+            "--max-bytes",
+            "8192",
+            "--output",
+            "research/capture",
+        ])
+        .unwrap();
+        assert!(matches!(
+            capture.cmd,
+            Cmd::Capture {
+                r#for: 60,
+                max_bytes: 8192,
+                output,
+            } if output == std::path::Path::new("research/capture")
+        ));
+        let board = Cli::try_parse_from([
+            "bodkin",
+            "board",
+            "--research",
+            "--data-dir",
+            "research/board",
+        ])
+        .unwrap();
+        assert!(matches!(
+            board.cmd,
+            Cmd::Board {
+                research: true,
+                live: false,
+                data_dir: Some(path),
+                ..
+            } if path == std::path::Path::new("research/board")
+        ));
+        let replay = Cli::try_parse_from([
+            "bodkin",
+            "replay",
+            "--research",
+            "--dataset",
+            "research/capture",
+        ])
+        .unwrap();
+        assert!(matches!(
+            replay.cmd,
+            Cmd::Replay {
+                research: true,
+                dataset: Some(path),
+                ..
+            } if path == std::path::Path::new("research/capture")
+        ));
+    }
 
     #[test]
     fn committed_helper_artifact_has_creation_and_runtime_bytecode() {

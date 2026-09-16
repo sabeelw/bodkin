@@ -2,10 +2,12 @@ use crate::engine::SnipeRules;
 use crate::pons::curve::{CurveState, quote_buy};
 use crate::pons::stream::{FlowEvent, FlowRecord};
 use crate::pons::tax::snipe_tax_bps;
+use crate::research::{CaptureManifest, ResearchEventKind, visit_capture};
 use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::Filter;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayLaunch {
@@ -430,9 +432,582 @@ pub async fn observe_first_sixty_blocks(
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ExperimentCount {
+    pub parameter: u64,
+    pub measured: u64,
+    pub matched: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResearchDatasetReport {
+    pub manifest: CaptureManifest,
+    pub launches: u64,
+    pub complete_followups: u64,
+    pub censored_launches: u64,
+    pub missing_records: u64,
+    pub launches_with_reused_fee_recipient: u64,
+    pub near_pattern_repeats_within_30m: u64,
+    pub min_taxed_buyers_s1: Vec<ExperimentCount>,
+    pub pre_entry_unique_buyers: Vec<ExperimentCount>,
+    pub positive_pre_entry_imbalance: u64,
+    pub pre_entry_insider_sells: u64,
+    pub inactivity_seconds: Vec<ExperimentCount>,
+    pub on_curve_hold_seconds: Vec<ExperimentCount>,
+    pub graduated_within_horizon: u64,
+    pub pool_paths_measured: u64,
+    pub quote_in_wei: Option<String>,
+    pub quote_out_wei: Option<String>,
+    pub economic_outcomes_measured: u64,
+    pub risk_result: &'static str,
+    pub recommendation: &'static str,
+}
+
+#[derive(Default)]
+struct ResearchLaunchFacts {
+    launched_at: u64,
+    launch_block: u64,
+    launch_canonical: bool,
+    fee_recipient: Option<String>,
+    near_pattern: Option<String>,
+    insiders: HashSet<Address>,
+    flow: Option<Vec<FlowRecord>>,
+    taxed_buyers_s1: Option<u64>,
+    pre_entry_unique_buyers: Option<u64>,
+    pre_entry_quote_in: Option<U256>,
+    pre_entry_quote_out: Option<U256>,
+    pre_entry_insider_sold: bool,
+    quote_in: Option<U256>,
+    quote_out: Option<U256>,
+    coverage_complete: bool,
+}
+
+pub fn research_dataset_report(
+    directory: impl AsRef<Path>,
+) -> anyhow::Result<ResearchDatasetReport> {
+    let mut launches = HashMap::<String, ResearchLaunchFacts>::new();
+    let mut missing_records = 0u64;
+    let manifest = visit_capture(directory, |envelope| {
+        match envelope.kind {
+            ResearchEventKind::Launch => {
+                if let Some(token) = envelope.data.get("token").and_then(|value| value.as_str()) {
+                    launches.entry(token.to_string()).or_insert_with(|| {
+                        research_launch_facts(&envelope.data, envelope.canonical.is_some())
+                    });
+                }
+            }
+            ResearchEventKind::Flow => {
+                if let Some(token) = envelope.data.get("token").and_then(|value| value.as_str())
+                    && let Some(launch) = launches.get_mut(token)
+                {
+                    launch.flow = envelope
+                        .data
+                        .get("records")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok());
+                    let range_complete = envelope.canonical.as_ref().is_some_and(|canonical| {
+                        envelope
+                            .data
+                            .get("from_block")
+                            .and_then(|value| value.as_u64())
+                            == Some(launch.launch_block)
+                            && envelope
+                                .data
+                                .get("to_block")
+                                .and_then(|value| value.as_u64())
+                                == Some(canonical.block_number)
+                    });
+                    launch.coverage_complete = launch.launch_canonical
+                        && launch.launched_at > 0
+                        && range_complete
+                        && envelope
+                            .data
+                            .get("coverage_complete")
+                            .and_then(|value| value.as_bool())
+                            == Some(true)
+                        && launch.flow.is_some();
+                    launch.taxed_buyers_s1 = envelope
+                        .data
+                        .pointer("/snapshot/taxed_buyers_s1")
+                        .and_then(|value| value.as_u64());
+                    launch.quote_in = parse_u256_at(&envelope.data, "/snapshot/quote_in");
+                    launch.quote_out = parse_u256_at(&envelope.data, "/snapshot/quote_out");
+                    if let Some(records) = &launch.flow
+                        && let Some((buyers, quote_in, quote_out, insider_sold)) =
+                            pre_entry_flow(launch.launched_at, records, &launch.insiders)
+                    {
+                        launch.pre_entry_unique_buyers = Some(buyers);
+                        launch.pre_entry_quote_in = Some(quote_in);
+                        launch.pre_entry_quote_out = Some(quote_out);
+                        launch.pre_entry_insider_sold = insider_sold;
+                    }
+                }
+            }
+            ResearchEventKind::Missing => missing_records = missing_records.saturating_add(1),
+            ResearchEventKind::Refusal
+            | ResearchEventKind::Outcome
+            | ResearchEventKind::Coverage => {}
+        }
+        Ok(())
+    })?;
+    let complete = launches
+        .values()
+        .filter(|launch| launch.coverage_complete)
+        .count();
+    let mut fee_counts = HashMap::<&str, usize>::new();
+    for fee in launches
+        .values()
+        .filter_map(|launch| launch.fee_recipient.as_deref())
+    {
+        *fee_counts.entry(fee).or_default() += 1;
+    }
+    let reused_fee = launches
+        .values()
+        .filter(|launch| {
+            launch
+                .fee_recipient
+                .as_deref()
+                .and_then(|fee| fee_counts.get(fee))
+                .is_some_and(|count| *count > 1)
+        })
+        .count();
+    let mut patterns = HashMap::<&str, Vec<u64>>::new();
+    for launch in launches.values() {
+        if let Some(pattern) = launch.near_pattern.as_deref() {
+            patterns
+                .entry(pattern)
+                .or_default()
+                .push(launch.launched_at);
+        }
+    }
+    let mut near_repeats = 0u64;
+    for times in patterns.values_mut() {
+        times.sort_unstable();
+        for pair in times.windows(2) {
+            if pair[1].saturating_sub(pair[0]) <= 1_800 {
+                near_repeats = near_repeats.saturating_add(1);
+            }
+        }
+    }
+    let min_taxed_buyers_s1 = [0u64, 1, 2]
+        .into_iter()
+        .map(|minimum| {
+            let matched = launches
+                .values()
+                .filter(|launch| {
+                    launch.coverage_complete
+                        && launch
+                            .taxed_buyers_s1
+                            .is_some_and(|buyers| buyers >= minimum)
+                })
+                .count();
+            ExperimentCount {
+                parameter: minimum,
+                measured: u64::try_from(complete).unwrap_or(u64::MAX),
+                matched: u64::try_from(matched).unwrap_or(u64::MAX),
+            }
+        })
+        .collect();
+    let pre_entry_unique_buyers = [1u64, 2, 3]
+        .into_iter()
+        .map(|minimum| {
+            let matched = launches
+                .values()
+                .filter(|launch| {
+                    launch.coverage_complete
+                        && launch
+                            .pre_entry_unique_buyers
+                            .is_some_and(|buyers| buyers >= minimum)
+                })
+                .count();
+            ExperimentCount {
+                parameter: minimum,
+                measured: u64::try_from(complete).unwrap_or(u64::MAX),
+                matched: u64::try_from(matched).unwrap_or(u64::MAX),
+            }
+        })
+        .collect();
+    let positive_pre_entry_imbalance = launches
+        .values()
+        .filter(|launch| {
+            launch.coverage_complete
+                && launch
+                    .pre_entry_quote_in
+                    .zip(launch.pre_entry_quote_out)
+                    .is_some_and(|(quote_in, quote_out)| quote_in > quote_out)
+        })
+        .count();
+    let pre_entry_insider_sells = launches
+        .values()
+        .filter(|launch| launch.coverage_complete && launch.pre_entry_insider_sold)
+        .count();
+    let inactivity_seconds = [60u64, 90, 180]
+        .into_iter()
+        .map(|window| {
+            let matched = launches
+                .values()
+                .filter(|launch| launch.coverage_complete && has_inactivity(launch, window))
+                .count();
+            ExperimentCount {
+                parameter: window,
+                measured: u64::try_from(complete).unwrap_or(u64::MAX),
+                matched: u64::try_from(matched).unwrap_or(u64::MAX),
+            }
+        })
+        .collect();
+    let on_curve_hold_seconds = [300u64, 900, 1_800]
+        .into_iter()
+        .map(|seconds| {
+            let matched = launches
+                .values()
+                .filter(|launch| launch.coverage_complete && on_curve_at(launch, seconds))
+                .count();
+            ExperimentCount {
+                parameter: seconds,
+                measured: u64::try_from(complete).unwrap_or(u64::MAX),
+                matched: u64::try_from(matched).unwrap_or(u64::MAX),
+            }
+        })
+        .collect();
+    let graduated = launches
+        .values()
+        .filter(|launch| {
+            launch.coverage_complete
+                && launch.flow.as_ref().is_some_and(|records| {
+                    records
+                        .iter()
+                        .any(|record| matches!(record.event, FlowEvent::Completed { .. }))
+                })
+        })
+        .count();
+    let (quote_in_wei, quote_out_wei) = aggregate_flow(&launches);
+    Ok(ResearchDatasetReport {
+        manifest,
+        launches: u64::try_from(launches.len()).unwrap_or(u64::MAX),
+        complete_followups: u64::try_from(complete).unwrap_or(u64::MAX),
+        censored_launches: u64::try_from(launches.len().saturating_sub(complete))
+            .unwrap_or(u64::MAX),
+        missing_records,
+        launches_with_reused_fee_recipient: u64::try_from(reused_fee).unwrap_or(u64::MAX),
+        near_pattern_repeats_within_30m: near_repeats,
+        min_taxed_buyers_s1,
+        pre_entry_unique_buyers,
+        positive_pre_entry_imbalance: u64::try_from(positive_pre_entry_imbalance)
+            .unwrap_or(u64::MAX),
+        pre_entry_insider_sells: u64::try_from(pre_entry_insider_sells).unwrap_or(u64::MAX),
+        inactivity_seconds,
+        on_curve_hold_seconds,
+        graduated_within_horizon: u64::try_from(graduated).unwrap_or(u64::MAX),
+        pool_paths_measured: 0,
+        quote_in_wei: quote_in_wei.map(|value| value.to_string()),
+        quote_out_wei: quote_out_wei.map(|value| value.to_string()),
+        economic_outcomes_measured: 0,
+        risk_result: "unmeasured",
+        recommendation: "inconclusive: capture has no complete entry-to-exit counterfactual pricing",
+    })
+}
+
+fn research_launch_facts(data: &serde_json::Value, launch_canonical: bool) -> ResearchLaunchFacts {
+    let transaction = data.get("transaction");
+    let record = data.get("record");
+    let meta = data.get("meta");
+    let launched_at = data
+        .pointer("/curve_state/launched_at")
+        .and_then(|value| value.as_u64())
+        .or_else(|| {
+            transaction
+                .and_then(|value| value.get("timestamp"))
+                .and_then(|value| value.as_u64())
+        })
+        .unwrap_or(0);
+    let mut insiders = HashSet::new();
+    for pointer in [
+        "/deployer",
+        "/transaction/from",
+        "/transaction/recipient",
+        "/record/creator_fee_recipient",
+    ] {
+        if let Some(address) = data.pointer(pointer).and_then(|value| value.as_str())
+            && let Ok(address) = address.parse()
+        {
+            insiders.insert(address);
+        }
+    }
+    if let Some(exemptions) = data
+        .pointer("/transaction/exemptions")
+        .and_then(|value| value.as_array())
+    {
+        for address in exemptions {
+            if let Some(address) = address.as_str()
+                && let Ok(address) = address.parse()
+            {
+                insiders.insert(address);
+            }
+        }
+    }
+    let dev_buy = transaction
+        .and_then(|value| value.get("dev_buy_wei"))
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<U256>().ok());
+    let creator_tax = record
+        .and_then(|value| value.get("creator_tax_bps"))
+        .and_then(|value| value.as_u64());
+    let exemption_count = transaction
+        .and_then(|value| value.get("exemptions"))
+        .and_then(|value| value.as_array())
+        .map(Vec::len);
+    let social_bits = ["twitter", "website", "telegram"]
+        .into_iter()
+        .fold(0u8, |bits, key| {
+            let present = meta
+                .and_then(|value| value.pointer(&format!("/socials/{key}")))
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| !value.trim().is_empty());
+            (bits << 1) | u8::from(present)
+        });
+    let near_pattern = dev_buy.zip(creator_tax).zip(exemption_count).map(
+        |((dev_buy, creator_tax), exemption_count)| {
+            let dev_bucket = dev_buy / U256::from(100_000_000_000_000u64);
+            let tax_bucket = creator_tax / 25;
+            format!("{dev_bucket}:{tax_bucket}:{exemption_count}:{social_bits}")
+        },
+    );
+    ResearchLaunchFacts {
+        launched_at,
+        launch_block: data
+            .get("launch_block")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        launch_canonical,
+        fee_recipient: record
+            .and_then(|value| value.get("creator_fee_recipient"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        near_pattern,
+        insiders,
+        ..Default::default()
+    }
+}
+
+fn parse_u256_at(value: &serde_json::Value, pointer: &str) -> Option<U256> {
+    value
+        .pointer(pointer)
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse().ok())
+}
+
+fn pre_entry_flow(
+    launched_at: u64,
+    records: &[FlowRecord],
+    insiders: &HashSet<Address>,
+) -> Option<(u64, U256, U256, bool)> {
+    let cutoff = launched_at.checked_add(2)?;
+    let mut buyers = HashSet::new();
+    let mut quote_in = U256::ZERO;
+    let mut quote_out = U256::ZERO;
+    let mut insider_sold = false;
+    for record in records {
+        match &record.event {
+            FlowEvent::Buy {
+                recipient,
+                quote_in: amount,
+                timestamp,
+                ..
+            } if *timestamp < cutoff => {
+                if !insiders.contains(recipient) {
+                    buyers.insert(*recipient);
+                }
+                quote_in = quote_in.checked_add(*amount)?;
+            }
+            FlowEvent::Sell {
+                seller,
+                recipient,
+                quote_out: amount,
+                timestamp,
+                ..
+            } if *timestamp < cutoff => {
+                insider_sold |= insiders.contains(seller) || insiders.contains(recipient);
+                quote_out = quote_out.checked_add(*amount)?;
+            }
+            _ => {}
+        }
+    }
+    Some((
+        u64::try_from(buyers.len()).unwrap_or(u64::MAX),
+        quote_in,
+        quote_out,
+        insider_sold,
+    ))
+}
+
+fn event_time(event: &FlowEvent) -> u64 {
+    match event {
+        FlowEvent::Buy { timestamp, .. }
+        | FlowEvent::Sell { timestamp, .. }
+        | FlowEvent::Tax { timestamp, .. }
+        | FlowEvent::Completed { timestamp } => *timestamp,
+    }
+}
+
+fn has_inactivity(launch: &ResearchLaunchFacts, window: u64) -> bool {
+    let Some(records) = &launch.flow else {
+        return false;
+    };
+    let horizon = records
+        .iter()
+        .filter_map(|record| match &record.event {
+            FlowEvent::Completed { timestamp } => Some(*timestamp),
+            _ => None,
+        })
+        .min()
+        .unwrap_or_else(|| launch.launched_at.saturating_add(3_600));
+    let mut last = launch.launched_at;
+    for record in records {
+        if event_time(&record.event) > horizon {
+            break;
+        }
+        if let FlowEvent::Buy {
+            recipient,
+            quote_in,
+            timestamp,
+            ..
+        } = &record.event
+            && !quote_in.is_zero()
+            && !launch.insiders.contains(recipient)
+        {
+            if timestamp.saturating_sub(last) >= window {
+                return true;
+            }
+            last = *timestamp;
+        }
+    }
+    horizon.saturating_sub(last) >= window
+}
+
+fn on_curve_at(launch: &ResearchLaunchFacts, seconds: u64) -> bool {
+    let target = launch.launched_at.saturating_add(seconds);
+    launch.flow.as_ref().is_some_and(|records| {
+        !records.iter().any(|record| {
+            matches!(record.event, FlowEvent::Completed { .. })
+                && event_time(&record.event) <= target
+        })
+    })
+}
+
+fn aggregate_flow(launches: &HashMap<String, ResearchLaunchFacts>) -> (Option<U256>, Option<U256>) {
+    launches
+        .values()
+        .filter(|launch| launch.coverage_complete)
+        .fold(
+            (Some(U256::ZERO), Some(U256::ZERO)),
+            |(quote_in, quote_out), launch| {
+                (
+                    quote_in.and_then(|total| total.checked_add(launch.quote_in?)),
+                    quote_out.and_then(|total| total.checked_add(launch.quote_out?)),
+                )
+            },
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_dataset_report_is_streamed_and_keeps_missing_economics_explicit() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("capture");
+        let mut recorder = crate::research::ResearchRecorder::create(
+            &output,
+            crate::research::CaptureLimits {
+                duration_seconds: 60,
+                max_bytes: 100_000,
+            },
+        )
+        .unwrap();
+        let token = Address::from([1; 20]);
+        let curve = Address::from([2; 20]);
+        recorder
+            .record(
+                ResearchEventKind::Launch,
+                Some(crate::research::CanonicalObservation {
+                    block_number: 1,
+                    block_hash: B256::from([1; 32]),
+                    block_timestamp: 100,
+                }),
+                serde_json::json!({
+                    "token":format!("{token:#x}"),
+                    "curve":format!("{curve:#x}"),
+                    "deployer":format!("{:#x}", Address::from([3; 20])),
+                    "launch_block":1,
+                    "curve_state":{"launched_at":100},
+                    "record":{"creator_fee_recipient":format!("{:#x}", Address::from([4; 20])),"creator_tax_bps":100},
+                    "transaction":{"from":format!("{:#x}", Address::from([3; 20])),"recipient":format!("{:#x}", Address::from([3; 20])),"timestamp":100,"dev_buy_wei":"1000000000000000","exemptions":[]},
+                    "meta":{"socials":{"twitter":"x","website":"","telegram":""}},
+                }),
+            )
+            .unwrap();
+        let records = vec![
+            FlowRecord {
+                block_number: 2,
+                block_hash: B256::from([2; 32]),
+                transaction_index: 0,
+                log_index: 0,
+                transaction_hash: B256::from([5; 32]),
+                event: FlowEvent::Buy {
+                    recipient: Address::from([9; 20]),
+                    quote_in: U256::from(10u64),
+                    tokens_out: U256::from(10u64),
+                    fee: U256::ZERO,
+                    tax: U256::ZERO,
+                    timestamp: 101,
+                    transaction_hash: B256::from([5; 32]),
+                },
+            },
+            FlowRecord {
+                block_number: 3,
+                block_hash: B256::from([3; 32]),
+                transaction_index: 0,
+                log_index: 0,
+                transaction_hash: B256::from([6; 32]),
+                event: FlowEvent::Completed { timestamp: 700 },
+            },
+        ];
+        recorder
+            .record(
+                ResearchEventKind::Flow,
+                Some(crate::research::CanonicalObservation {
+                    block_number: 100,
+                    block_hash: B256::from([9; 32]),
+                    block_timestamp: 3_700,
+                }),
+                serde_json::json!({
+                    "token":format!("{token:#x}"),
+                    "from_block":1,
+                    "to_block":100,
+                    "records":records,
+                    "coverage_complete":true,
+                    "snapshot":{"taxed_buyers_s1":2,"quote_in":"10","quote_out":"0"},
+                }),
+            )
+            .unwrap();
+        recorder
+            .finish(crate::research::CaptureStopReason::Requested)
+            .unwrap();
+        let report = research_dataset_report(&output).unwrap();
+        assert_eq!(report.launches, 1);
+        assert_eq!(report.complete_followups, 1);
+        assert_eq!(report.min_taxed_buyers_s1[2].matched, 1);
+        assert_eq!(report.pre_entry_unique_buyers[0].matched, 1);
+        assert_eq!(report.pre_entry_unique_buyers[1].matched, 0);
+        assert_eq!(report.positive_pre_entry_imbalance, 1);
+        assert_eq!(report.pre_entry_insider_sells, 0);
+        assert_eq!(report.inactivity_seconds[1].matched, 1);
+        assert_eq!(report.on_curve_hold_seconds[0].matched, 1);
+        assert_eq!(report.on_curve_hold_seconds[1].matched, 0);
+        assert_eq!(report.economic_outcomes_measured, 0);
+        assert_eq!(report.risk_result, "unmeasured");
+    }
 
     #[test]
     fn experiment_manifest_pins_dataset_and_strategy() {

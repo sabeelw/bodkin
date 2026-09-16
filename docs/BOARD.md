@@ -1,7 +1,7 @@
 # The board
 
 `bodkin board` runs the sniper engine (axum) and serves `web/board.html` on `http://127.0.0.1:4663`. It binds loopback only; nothing outside
-your machine can reach it. Dry run unless you started it with `--live`.
+your machine can reach it. Dry run unless you started it with `--live`. `bodkin board --research --data-dir <separate-dir>` selects the isolated modeled research profile and is rejected with `--live` or any path inside/aliasing normal `data/`.
 
 **It opens as a feed.** Launches arrive, get scored and explained, and nothing fires until you press **start demo** (dry-run buys, no key
 needed) or, with `--live`, **arm live sniping** (confirmed once in the terminal at start and once more on the button). **stop** returns to
@@ -11,14 +11,14 @@ the feed; positions keep being marked and closed by their exit rules either way.
 
 ## Reading it
 
-**Header.** The mode pill shows `feed only`, `demo trading`, `LIVE · not armed` or `LIVE · armed`. The subtitle shows how many launches
+**Header.** The mode pill shows `feed only`, `demo trading`, `RESEARCH · feed only`, `RESEARCH · modeled`, `LIVE · not armed` or `LIVE · armed`. Research mode also shows its immutable profile/run, isolated state directory, modeled equity/drawdown and active/unknown/liquidating/halted risk state. The subtitle shows how many launches
 the chain produced in the last five minutes. The clock is UTC, the same clock the feed uses.
 
 **The pulse.** The engine sends a tick every ten seconds with feed, chain-clock and RPC-gate state, including RPC latency percentiles. A yellow bar says when the chain has been quiet or an endpoint is benched; a red bar reports an unseeded/stale/high-jitter chain clock or an engine that has not answered for 35 s,
 which means its console window is gone or stuck: close it and start bodkin again. Every button waits at most eight seconds for the engine and
 says so if it hears nothing, instead of dying silently.
 
-**Five numbers.** Launches seen this session · fired · open positions · realized PnL after recorded entry and exit gas in ETH across the authoritative position snapshot · uptime. Unknown legacy realized basis displays `n/a` rather than zero. A tile flashes yellow
+**Five numbers.** Launches seen this session · fired · open positions · realized PnL after recorded entry and exit gas in ETH across the authoritative position snapshot · uptime. Research labels this PnL as modeled and separately exposes cash/equity, exit-gas reserves, peak/drawdown and the persistent liquidation latch; unknown liquidation value is shown as unknown and blocks admission. Unknown legacy realized basis displays `n/a` rather than zero. A tile flashes yellow
 when its number changes.
 
 **Launches.** Newest first. Each row: time, name and symbol with a copy-contract button, pair asset, dev buy as a share of supply, creator tax,
@@ -41,6 +41,7 @@ shown but not editable here.
 | Control | What it does |
 |---|---|
 | **start demo / stop demo** (`p`) | dry-run buys on or off; launches keep arriving and scoring either way, positions keep being managed |
+| **start research / stop research** (`p`, only with `--research`) | modeled entries under the persistent 0.05 ETH / 2% / 10% drawdown profile; a risk latch cannot be reset by start |
 | **arm live sniping / disarm** (`p`, only with `--live`) | real buys on or off, with a confirmation on the button |
 | **sound** | a short beep on every fire; off by default |
 | **all / fire / eth pairs** (`a`, `f`) | filter the feed |
@@ -58,7 +59,7 @@ All on `127.0.0.1` only.
 |---|---|---|
 | GET | `/` | the page |
 | GET | `/events` | server-sent events including `hello`, lag-triggered `resync`, `tick`, `launch`, `hold`, `entry`, `fire`, `mark`, `exit`, error states, `paused`, `rules`, and `index` |
-| GET | `/api/state` | a snapshot: mode, paused, rules, counters, positions, ETH/USD, feed and RPC health, the last 100 events |
+| GET | `/api/state` | an absolute snapshot: mode, selected data directory, immutable research profile/run/portfolio when selected, paused, rules, counters, positions, ETH/USD, feed and RPC health, the last 100 events |
 | POST | `/api/start`, `/api/stop` | firing on / off (`/api/resume` and `/api/pause` are the same verbs) |
 | POST | `/api/close/<positionId>` | idempotently queue a serialized close and return `202 Accepted`; retries report `alreadyPending`, and SSE reports confirmation/failure |
 | POST | `/api/rules` | body `{"minScore": 70}` etc.; only the five editable rules, clamped to their bounds |

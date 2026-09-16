@@ -1,10 +1,10 @@
 //! Ports of legacy/test/{score,engine,v4,links}.test.ts. If these fail, the rewrite drifted.
 
-use alloy::primitives::{Address, U256, address};
+use alloy::primitives::{Address, B256, U256, address};
 use bodkin::engine::{decide, live_gate, rules_from_env};
 use bodkin::links::{Links, osc, ref_line};
 use bodkin::pons::curve::CurveState;
-use bodkin::pons::deployer::DeployerIndex;
+use bodkin::pons::deployer::{DeployerIndex, HistoryCoverage};
 use bodkin::pons::enrich::{LaunchIntel, LaunchRecord, LaunchTx, PairInfo, Socials, TokenMeta};
 use bodkin::pons::fingerprint::FarmDetector;
 use bodkin::pons::launches::LaunchEvent;
@@ -220,7 +220,13 @@ fn deployer_index_from_memory() {
         source: "unknown",
     };
     assert!(idx.quick(A, 100).is_none());
-    idx.mark_ready();
+    idx.mark_ready(HistoryCoverage {
+        chain_id: bodkin::CHAIN_ID,
+        factory: bodkin::ADDR.pons_factory,
+        from_block: 0,
+        to_block: 100,
+        anchor: B256::ZERO,
+    });
     idx.note(&ev(
         address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         10,
@@ -237,7 +243,7 @@ fn deployer_index_from_memory() {
         address!("0xcccccccccccccccccccccccccccccccccccccccc"),
         30,
     ));
-    idx.mark_graduated(address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    idx.mark_graduated(address!("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), 15);
     assert_eq!(idx.quick(A, 25), Some((2, 1)));
     assert_eq!(idx.quick(A, 5), Some((0, 0)));
     assert_eq!(idx.size(), (1, 3, 1));

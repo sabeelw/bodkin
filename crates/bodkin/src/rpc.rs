@@ -223,6 +223,21 @@ impl Rpc {
         }
     }
 
+    pub async fn call_before(
+        &self,
+        lane: Lane,
+        method: &str,
+        params: Value,
+        deadline: Instant,
+    ) -> anyhow::Result<Value> {
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.call(lane, method, params),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("rpc {method}: deadline expired"))?
+    }
+
     pub async fn call(&self, lane: Lane, method: &str, params: Value) -> anyhow::Result<Value> {
         let _enrich_pending = (lane == Lane::Enrich).then(|| {
             self.gate.enrich_pending.fetch_add(1, Ordering::Relaxed);
@@ -663,7 +678,7 @@ impl Rpc {
         }))
     }
 
-    /// Reserve a spaced send slot, wait for it, then take a capacity permit.
+    /// Take capacity, then wait for the actual spaced dispatch slot.
     /// The returned guard holds the permit until the caller drops it after the
     /// response body has been read.
     async fn acquire(&self, lane: Lane, method: &str) -> SemaphorePermit<'_> {
@@ -671,6 +686,22 @@ impl Rpc {
         let _waiting = scopeguard::guard(&self.gate.waiting, |waiting| {
             waiting.fetch_sub(1, Ordering::Relaxed);
         });
+        let permit = match lane {
+            Lane::Hot => match self.gate.hot.try_acquire() {
+                Ok(permit) => permit,
+                Err(_) => tokio::select! {
+                    permit = self.gate.shared.acquire() => permit,
+                    permit = self.gate.hot.acquire() => permit,
+                }
+                .expect("gate semaphore closed"),
+            },
+            _ => self
+                .gate
+                .shared
+                .acquire()
+                .await
+                .expect("gate semaphore closed"),
+        };
         let cooling = self.gate.cooldown_until.load(Ordering::Relaxed) > now_ms();
         let mut spacing = self.gate.spacing_ms;
         if method == "eth_getLogs" {
@@ -681,33 +712,16 @@ impl Rpc {
             Lane::Hot => spacing / 5,
             _ => spacing,
         } * if cooling { 3 } else { 1 };
-        let start_at = {
+        {
             let mut next = self.gate.next_start.lock().await;
             let now = Instant::now();
-            let start = (*next).max(now);
-            *next = start + Duration::from_millis(spacing.max(1));
-            start
-        };
-        let now = Instant::now();
-        if start_at > now {
-            tokio::time::sleep(start_at - now).await;
+            let start_at = (*next).max(now);
+            if start_at > now {
+                tokio::time::sleep(start_at - now).await;
+            }
+            *next = Instant::now() + Duration::from_millis(spacing.max(1));
         }
-        match lane {
-            Lane::Hot => match self.gate.hot.try_acquire() {
-                Ok(p) => p,
-                Err(_) => tokio::select! {
-                    p = self.gate.shared.acquire() => p,
-                    p = self.gate.hot.acquire() => p,
-                }
-                .expect("gate semaphore closed"),
-            },
-            _ => self
-                .gate
-                .shared
-                .acquire()
-                .await
-                .expect("gate semaphore closed"),
-        }
+        permit
     }
 
     async fn acquire_background(&self) -> SemaphorePermit<'_> {
@@ -1149,6 +1163,21 @@ mod tests {
             .unwrap()
     }
 
+    async fn very_delayed_body_handler(State(calls): State<Arc<AtomicUsize>>) -> Response {
+        calls.fetch_add(1, Ordering::SeqCst);
+        let body = Body::from_stream(futures_util::stream::once(async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            Ok::<_, Infallible>(BodyBytes::from_static(
+                br#"{"jsonrpc":"2.0","id":1,"result":"0x1"}"#,
+            ))
+        }));
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(body)
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn gate_permit_is_held_until_the_response_body_is_consumed() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1192,6 +1221,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn call_deadline_cancels_a_slow_response_body() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let state = calls.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/", post(very_delayed_body_handler))
+                    .with_state(state),
+            )
+            .await
+            .unwrap();
+        });
+        let mut config = test_cfg(1, 0);
+        config.rpc_http[0].url = format!("http://{address}");
+        let rpc = Rpc::new(&config).unwrap();
+        let result = rpc
+            .call_before(
+                Lane::Hot,
+                "eth_blockNumber",
+                json!([]),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(rpc.stats().active, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn gate_capacity_is_bounded() {
         let rpc = Rpc::new(&test_cfg(1, 0)).unwrap();
         let p1 = rpc.acquire(Lane::Hot, "eth_blockNumber").await;
@@ -1228,6 +1290,22 @@ mod tests {
         );
         assert_eq!(rpc.stats().queued, 0);
         drop(permit);
+    }
+
+    #[tokio::test]
+    async fn cancelled_spacing_wait_does_not_reserve_a_future_slot() {
+        let rpc = Rpc::new(&test_cfg(2, 1_000)).unwrap();
+        drop(rpc.acquire(Lane::Hot, "x").await);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), rpc.acquire(Lane::Hot, "x"))
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), rpc.acquire(Lane::Hot, "x"))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

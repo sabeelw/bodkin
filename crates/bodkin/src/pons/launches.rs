@@ -362,7 +362,17 @@ pub async fn recent_launches(
     token: Option<Address>,
 ) -> anyhow::Result<Vec<LaunchEvent>> {
     let head = rpc.block_number(Lane::Background).await?;
-    let from = head.saturating_sub(blocks);
+    launches_in_range(rpc, head.saturating_sub(blocks), head, deployer, token).await
+}
+
+pub async fn launches_in_range(
+    rpc: &Rpc,
+    from: u64,
+    to: u64,
+    deployer: Option<Address>,
+    token: Option<Address>,
+) -> anyhow::Result<Vec<LaunchEvent>> {
+    anyhow::ensure!(from <= to, "launch history range is reversed");
     let step: u64 = if deployer.is_some() || token.is_some() {
         100_000
     } else {
@@ -370,13 +380,13 @@ pub async fn recent_launches(
     };
     let mut out = Vec::new();
     let mut b = from;
-    while b <= head {
-        let to = (b + step - 1).min(head);
+    while b <= to {
+        let end = b.saturating_add(step - 1).min(to);
         let mut filter = Filter::new()
             .address(ADDR.pons_factory)
             .event_signature(topics::token_launched())
             .from_block(b)
-            .to_block(to);
+            .to_block(end);
         if let Some(t) = token {
             filter = filter.topic1(addr_word(t));
         }
@@ -385,10 +395,10 @@ pub async fn recent_launches(
         }
         let logs = rpc.get_logs(Lane::Background, filter).await?;
         out.extend(logs.iter().filter_map(to_event));
-        if to == head {
+        if end == to {
             break;
         }
-        b = to + 1;
+        b = end + 1;
     }
     out.sort_by_key(|e| (e.block_number, e.log_index));
     Ok(out)
@@ -398,27 +408,35 @@ pub async fn recent_launches(
 /// Returns (token, block_number) pairs — feeds the deployer graduation index.
 pub async fn recent_graduations(rpc: &Rpc, blocks: u64) -> anyhow::Result<Vec<(Address, u64)>> {
     let head = rpc.block_number(Lane::Background).await?;
-    let from = head.saturating_sub(blocks);
+    graduations_in_range(rpc, head.saturating_sub(blocks), head).await
+}
+
+pub async fn graduations_in_range(
+    rpc: &Rpc,
+    from: u64,
+    to: u64,
+) -> anyhow::Result<Vec<(Address, u64)>> {
+    anyhow::ensure!(from <= to, "graduation history range is reversed");
     let step: u64 = 25_000;
     let mut out = Vec::new();
     let mut b = from;
-    while b <= head {
-        let to = (b + step - 1).min(head);
+    while b <= to {
+        let end = b.saturating_add(step - 1).min(to);
         let filter = Filter::new()
             .address(ADDR.pons_factory)
             .event_signature(topics::pool_graduated())
             .from_block(b)
-            .to_block(to);
+            .to_block(end);
         let logs = rpc.get_logs(Lane::Background, filter).await?;
         for l in &logs {
             if let Ok(g) = factory::PoolGraduated::decode_log(&l.clone().into()) {
                 out.push((g.token, l.block_number.unwrap_or(0)));
             }
         }
-        if to == head {
+        if end == to {
             break;
         }
-        b = to + 1;
+        b = end + 1;
     }
     Ok(out)
 }

@@ -13,6 +13,7 @@ pub mod links;
 pub mod outcomes;
 pub mod pons;
 pub mod replay;
+pub mod research;
 pub mod rpc;
 pub mod run;
 pub mod score;

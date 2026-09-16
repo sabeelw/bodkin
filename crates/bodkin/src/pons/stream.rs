@@ -17,6 +17,7 @@ pub struct FlowSnapshot {
     pub unique_buyers: u32,
     pub quote_in: U256,
     pub quote_out: U256,
+    pub last_non_insider_buy_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -300,6 +301,14 @@ impl FlowTracker {
                     snapshot.buys = snapshot.buys.saturating_add(1);
                     snapshot.quote_in = snapshot.quote_in.saturating_add(*quote_in);
                     buyers.insert(*recipient);
+                    if !quote_in.is_zero() && !flow.insiders.contains(recipient) {
+                        snapshot.last_non_insider_buy_at = Some(
+                            snapshot
+                                .last_non_insider_buy_at
+                                .unwrap_or_default()
+                                .max(*timestamp),
+                        );
+                    }
                     let was_taxed = taxed.contains(transaction_hash);
                     let elapsed = timestamp.saturating_sub(flow.launched_at);
                     if elapsed == 1 && was_taxed {
@@ -517,6 +526,55 @@ mod tests {
         f.ingest(&l, 1_000).unwrap();
         f.ingest(&l, 1_000).unwrap(); // replay / reconnect re-deliver
         assert_eq!(f.snapshot(curve).buys, 1);
+    }
+
+    #[test]
+    fn snapshot_tracks_last_positive_non_insider_buy() {
+        let curve = a(9);
+        let insider = a(99);
+        let outsider = a(2);
+        let mut tracker = FlowTracker::default();
+        tracker.watch(curve, 1_000, 1, [insider]);
+        tracker
+            .ingest(
+                &buy_log(
+                    curve,
+                    insider,
+                    insider,
+                    U256::from(10u64),
+                    B256::from(U256::from(1u64)),
+                    0,
+                ),
+                1_001,
+            )
+            .unwrap();
+        tracker
+            .ingest(
+                &buy_log(
+                    curve,
+                    outsider,
+                    outsider,
+                    U256::from(20u64),
+                    B256::from(U256::from(2u64)),
+                    1,
+                ),
+                1_005,
+            )
+            .unwrap();
+        tracker
+            .ingest(
+                &buy_log(
+                    curve,
+                    a(3),
+                    a(3),
+                    U256::ZERO,
+                    B256::from(U256::from(3u64)),
+                    2,
+                ),
+                1_006,
+            )
+            .unwrap();
+        assert_eq!(tracker.snapshot(curve).last_non_insider_buy_at, Some(1_005));
     }
 
     #[test]

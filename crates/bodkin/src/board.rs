@@ -3,8 +3,9 @@ use crate::engine::SnipeRules;
 use crate::fmt::wei_to_f64;
 use crate::links::Links;
 use crate::pons::clock::now_ms;
+use crate::research::ResearchProfile;
 use crate::rpc::Rpc;
-use crate::run::{EngineHandle, start_engine};
+use crate::run::{EngineHandle, EngineMode, EngineOptions, start_engine_with_options};
 use crate::style::{info, muted, neon, on_neon};
 use alloy::primitives::U256;
 use axum::extract::{Path, State};
@@ -29,6 +30,9 @@ const HTML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/
 struct BoardState {
     engine: EngineHandle,
     live: bool,
+    mode: &'static str,
+    research: Option<ResearchProfile>,
+    data_dir: String,
     started_at: u64,
     seen: Arc<AtomicU64>,
     fired: Arc<AtomicU64>,
@@ -51,7 +55,25 @@ pub async fn start_board(
     live: bool,
     rules: SnipeRules,
 ) -> anyhow::Result<()> {
+    start_board_with_options(rpc, cfg, port, rules, EngineOptions::standard(live)).await
+}
+
+pub async fn start_board_with_options(
+    rpc: Arc<Rpc>,
+    cfg: Config,
+    port: u16,
+    rules: SnipeRules,
+    options: EngineOptions,
+) -> anyhow::Result<()> {
     anyhow::ensure!(port > 0, "board port must be greater than zero");
+    options.validate()?;
+    let live = options.is_live();
+    let mode = options.label();
+    let research = match &options.mode {
+        EngineMode::Research(profile) => Some(profile.clone()),
+        EngineMode::Dry | EngineMode::Live => None,
+    };
+    let data_dir = options.data_dir.display().to_string();
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let (bus, _) = broadcast::channel::<String>(256);
@@ -98,10 +120,14 @@ pub async fn start_board(
             let _ = bus.send(event.to_string());
         }) as crate::run::Emit
     };
-    let engine = start_engine(rpc.clone(), cfg.clone(), rules, live, true, emit).await?;
+    let engine =
+        start_engine_with_options(rpc.clone(), cfg.clone(), rules, options, true, emit).await?;
     let st = Arc::new(BoardState {
         engine,
         live,
+        mode,
+        research,
+        data_dir,
         started_at: now_ms(),
         seen,
         fired,
@@ -121,8 +147,9 @@ pub async fn start_board(
                     break;
                 }
                 let h = health(&st);
+                let research_portfolio = st.engine.research_snapshot().ok().flatten();
                 let _ = st.bus.send(
-                    json!({"kind":"tick","t": now_ms(), "paused": st.engine.paused(), "health": h})
+                    json!({"kind":"tick","t": now_ms(), "paused": st.engine.paused(), "health": h, "researchPortfolio":research_portfolio})
                         .to_string(),
                 );
             }
@@ -137,6 +164,8 @@ pub async fn start_board(
         muted("board"),
         if live {
             on_neon(" LIVE ")
+        } else if mode == "research" {
+            muted("research · modeled")
         } else {
             muted("dry run")
         },
@@ -454,9 +483,13 @@ async fn rules_edit(
 
 async fn hello(st: &BoardState) -> Value {
     let links = Links::from_env();
+    let research_snapshot = st.engine.research_snapshot().ok().flatten();
     json!({
         "kind": "hello",
         "live": st.live,
+        "mode": st.mode,
+        "dataDir": st.data_dir,
+        "research": st.research.as_ref().map(|profile| json!({"profile":profile,"modeled":true,"runId":st.engine.research_run_id(),"portfolio":research_snapshot})),
         "paused": st.engine.paused(),
         "rules": rules_view(&st.engine.rules.lock()),
         "startedAt": st.started_at,
@@ -544,7 +577,7 @@ fn health(st: &BoardState) -> Value {
             "note": f.note,
         },
         "lastLaunchAgeSec": if f.last_launch_at > 0 { json!((now_ms().saturating_sub(f.last_launch_at)) / 1000) } else { Value::Null },
-        "clock": {"seeded":c.seeded(),"ageMs":c.age_ms(),"jitterMs":c.jitter_ms(),"lastBlock":c.last_block()},
+        "clock": {"seeded":c.seeded(),"boundaryObservations":c.boundary_observations(),"ageMs":c.age_ms(),"jitterMs":c.jitter_ms(),"lastBlock":c.last_block()},
         "gate": {
             "active": g.active, "queued": g.queued, "inFlight": g.in_flight, "spacingMs": g.spacing_ms,
             "logsSpacingMs": g.logs_spacing_ms, "throttled": g.throttled, "coolingDown": g.cooling_down,
@@ -760,6 +793,9 @@ mod tests {
         let state = Arc::new(BoardState {
             engine,
             live: false,
+            mode: "research",
+            research: Some(ResearchProfile::default()),
+            data_dir: "research-data".into(),
             started_at: 1,
             seen: Arc::new(AtomicU64::new(3)),
             fired: Arc::new(AtomicU64::new(1)),
@@ -787,6 +823,13 @@ mod tests {
         .await;
         assert_eq!(first_state["positions"], second_state["positions"]);
         assert_eq!(first_state["seen"], second_state["seen"]);
+        assert_eq!(first_state["mode"], "research");
+        assert_eq!(first_state["dataDir"], "research-data");
+        assert_eq!(
+            first_state["research"]["profile"]["name"],
+            "risk-normalized-v1"
+        );
+        assert_eq!(first_state["research"]["modeled"], true);
         assert_eq!(first_state["positions"][0]["closing"], false);
         assert_eq!(
             first_state["positions"][0]["token"],
@@ -865,7 +908,10 @@ mod tests {
                 .note_header(ts, now - (ts_now - ts) * 1_000, 1, 1 + (ts - last));
         }
         if ts_now == last {
-            state.engine.clock().note_header(ts_now, now, 1, 2);
+            state
+                .engine
+                .clock()
+                .note_header(ts_now + 1, now + 1_000, 1, 2);
         }
         for _ in 0..2 {
             let response = app

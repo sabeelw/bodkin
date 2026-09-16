@@ -68,6 +68,8 @@ Five of these (min score, max open, tax ceiling, dev share, exempt wallets) can 
 A launch with four wallets exempt from the opening tax is refused by the default rules even when everything else looks good.
 That is the point of showing reasons: you decide which rule to relax, on purpose.
 
+The opt-in research profile does not change those live defaults. It starts from 0.05 modeled ETH, caps one token's entry value plus modeled attempt gas at 2% of current known equity, permits three positions, reserves modeled exit gas, reuses settled sale proceeds, and latches full liquidation at 10% peak drawdown. Its predefined offline comparisons are second-1 buyer minimums 0/1/2, inactivity 60/90/180 seconds, on-curve holds 5/15/30 minutes, and pre-graduation versus hold-through-graduation. Missing pool/counterfactual pricing is unmeasured, not a win or loss.
+
 ## Exits
 
 On the curve, stop-loss is replaced by **stale** and **insider sell**. Ladder takes partials. SL / trail / max-hold still fire after graduation.

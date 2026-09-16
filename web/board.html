@@ -203,7 +203,7 @@
     <div class="stat" id="st-seen"><div class="v" id="s-seen">0</div><div class="k">launches</div></div>
     <div class="stat" id="st-fire"><div class="v neon" id="s-fire">0</div><div class="k">fired</div></div>
     <div class="stat" id="st-open"><div class="v" id="s-open">0</div><div class="k">open</div></div>
-    <div class="stat" id="st-pnl"><div class="v" id="s-pnl">0.0000</div><div class="k">realized after gas, ETH</div></div>
+    <div class="stat" id="st-pnl"><div class="v" id="s-pnl">0.0000</div><div class="k" id="pnl-label">realized after gas, ETH</div></div>
     <div class="stat"><div class="v" id="s-up">0m</div><div class="k">uptime</div></div>
   </section>
   <section class="panel">
@@ -247,7 +247,7 @@
 <script>
   const $ = (id) => document.getElementById(id);
   const feed = $("feed"), positions = $("positions"), drawer = $("drawer");
-  const state = { seen: 0, fired: 0, startedAt: Date.now(), live: false, paused: true, pos: new Map(), posSig: "", rows: new Map(), filter: "all", q: "", sound: false, sel: null, drawerReturn: null, rules: null, tempo: [], refs: {}, health: null, lastTick: Date.now(), connected: false, engineError: null };
+  const state = { seen: 0, fired: 0, startedAt: Date.now(), live: false, mode: "dry", research: null, dataDir: "data", paused: true, pos: new Map(), posSig: "", rows: new Map(), filter: "all", q: "", sound: false, sel: null, drawerReturn: null, rules: null, tempo: [], refs: {}, health: null, lastTick: Date.now(), connected: false, engineError: null };
   const timeFormatter = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: "UTC" });
   const fmtEth = (wei) => { try { return (Number(BigInt(wei)) / 1e18).toFixed(4); } catch { return "?"; } };
   const fmtPnl = (value) => typeof value === "number" && Number.isFinite(value) ? `${value >= 0 ? "+" : ""}${value.toFixed(1)}%` : "n/a";
@@ -281,23 +281,25 @@
   function renderMode() {
     const m = $("mode"), t = $("mode-text"), run = $("run");
     const armed = state.live && !state.paused;
+    const research = state.mode === "research";
     const stopped = !!state.health?.stopped;
     m.className = stopped ? "pill" : "pill" + (armed ? " live" : "") + (!state.paused && !state.live ? " paused" : "");
-    t.textContent = stopped ? "halted" : !state.connected ? "connecting" : state.live ? (state.paused ? "LIVE · not armed" : "LIVE · armed") : (state.paused ? "feed only" : "demo trading");
-    run.textContent = state.live ? (state.paused ? "arm live sniping" : "disarm") : (state.paused ? "start demo" : "stop demo");
+    t.textContent = stopped ? "halted" : !state.connected ? "connecting" : state.live ? (state.paused ? "LIVE · not armed" : "LIVE · armed") : research ? (state.paused ? "RESEARCH · feed only" : "RESEARCH · modeled") : (state.paused ? "feed only" : "demo trading");
+    run.textContent = state.live ? (state.paused ? "arm live sniping" : "disarm") : research ? (state.paused ? "start research" : "stop research") : (state.paused ? "start demo" : "stop demo");
     run.className = "btn" + (state.live && state.paused ? " arm" : "") + (!state.paused ? " on" : "");
     run.disabled = stopped;
     run.setAttribute("aria-pressed", !state.paused ? "true" : "false");
     $("sound").setAttribute("aria-pressed", state.sound ? "true" : "false");
-    $("foot-mode").textContent = state.live ? "LIVE" : "dry run";
-    $("pos-mode").textContent = state.live ? "live" : "dry";
+    $("foot-mode").textContent = state.live ? "LIVE" : research ? `research · ${state.research?.profile?.name || "modeled"}` : "dry run";
+    $("pos-mode").textContent = state.live ? "live" : research ? "research" : "dry";
+    $("pnl-label").textContent = research ? "modeled realized after gas, ETH" : "realized after gas, ETH";
     $("sound").textContent = state.sound ? "sound on" : "sound off";
     $("sound").classList.toggle("on", state.sound);
   }
   $("run").onclick = async () => {
     if (state.live && state.paused && !confirm("Arm LIVE sniping? Real ETH leaves your wallet under the rules on screen, up to the session budget.")) return;
     const b = $("run"); b.disabled = true;
-    try { const r = await post(state.paused ? "/api/start" : "/api/stop"); state.paused = r.paused; renderMode(); toast(state.paused ? "stopped: launches keep coming, nothing fires" : state.live ? "armed" : "demo started: dry-run buys are on"); }
+    try { const r = await post(state.paused ? "/api/start" : "/api/stop"); state.paused = r.paused; renderMode(); toast(state.paused ? "stopped: launches keep coming, nothing fires" : state.live ? "armed" : state.mode === "research" ? "research started: modeled buys are on" : "demo started: dry-run buys are on"); }
     catch {} finally { if (!state.health?.stopped) b.disabled = false; }
   };
   $("sound").onclick = () => { state.sound = !state.sound; renderMode(); if (state.sound) beep(); };
@@ -310,9 +312,10 @@
     const sinceTick = Date.now() - state.lastTick;
     if (state.connected && sinceTick > 35000) { n.hidden = false; n.className = "notice bad"; n.textContent = `the engine has not answered for ${Math.round(sinceTick / 1000)} s. Close its console window and start it again.`; return; }
     const h = state.health;
-    if (h && h.clock && (!h.clock.seeded || h.clock.ageMs > 2000 || h.clock.jitterMs > 1500)) { n.hidden = false; n.className = "notice bad"; n.textContent = `chain clock unhealthy · age ${h.clock.ageMs} ms · jitter ${h.clock.jitterMs} ms`; return; }
+    if (h && h.clock && (!h.clock.seeded || h.clock.boundaryObservations < 2 || h.clock.ageMs > 2000 || h.clock.jitterMs > 1500)) { n.hidden = false; n.className = "notice bad"; n.textContent = `chain clock unhealthy · boundaries ${h.clock.boundaryObservations || 0} · age ${h.clock.ageMs} ms · jitter ${h.clock.jitterMs} ms`; return; }
     if (h && h.lastLaunchAgeSec != null && h.lastLaunchAgeSec > 120) { n.hidden = false; n.className = "notice"; n.textContent = `no launch for ${h.lastLaunchAgeSec} s · feed ${h.feed.mode}${h.feed.note ? " · " + h.feed.note : ""}${h.gate.coolingDown ? " · rpc cooling down after a 429" : ""}`; return; }
     if (h && h.gate.endpoints.some((e) => e.benched)) { n.hidden = false; n.className = "notice"; n.textContent = `rpc ${h.gate.endpoints.filter((e) => e.benched).map((e) => e.label).join(", ")} benched, using the other endpoint`; return; }
+    if (state.mode === "research") { const p = state.research?.profile || {}, b = state.research?.portfolio; const equity = b?.equity_wei == null ? "equity unknown" : `${fmtEth(b.equity_wei)} ETH equity`; const drawdown = b?.drawdown_bps == null ? "drawdown unknown" : `${(Number(b.drawdown_bps) / 100).toFixed(2)}% drawdown`; n.hidden = false; n.className = b?.risk_state === "active" ? "notice" : "notice bad"; n.textContent = `modeled research ${p.name || "unknown"} · ${equity} · ${drawdown} · ${b?.risk_state || "unavailable"} · ${(Number(p.max_commitment_bps || 0) / 100).toFixed(0)}% commitment · isolated ${state.dataDir}`; return; }
     n.hidden = true;
   }
 
@@ -521,7 +524,7 @@
   /* events */
   function onEvent(e) {
     if (e.kind === "hello" || e.kind === "resync") {
-      state.live = e.live; state.paused = !!e.paused; state.startedAt = e.startedAt; state.seen = e.seen || 0; state.fired = e.fired || 0; state.rules = e.rules;
+      state.live = e.live; state.mode = e.mode || (e.live ? "live" : "dry"); state.research = e.research || null; state.dataDir = e.dataDir || "data"; state.paused = !!e.paused; state.startedAt = e.startedAt; state.seen = e.seen || 0; state.fired = e.fired || 0; state.rules = e.rules;
       state.refs = e.refs || {}; state.health = e.health || null; state.lastTick = Date.now(); state.connected = true; renderRefs();
       state.pos.clear(); state.posSig = "";
       for (const p of e.positions || []) {
@@ -531,6 +534,7 @@
     } else if (e.kind === "tick") {
       const wasStopped = !!state.health?.stopped;
       state.lastTick = Date.now(); state.health = e.health || null;
+      if (state.research && e.researchPortfolio) state.research.portfolio = e.researchPortfolio;
       if (state.paused !== !!e.paused) { state.paused = !!e.paused; renderMode(); }
       else if (!!state.health?.stopped !== wasStopped) renderMode();
     }
@@ -546,7 +550,7 @@
       state.fired++; bump("st-fire"); beep();
       const launch = state.rows.get(e.token)?.e;
       state.pos.set(e.positionId, { token: e.token, curve: e.curve || launch?.curve, name: e.name || launch?.name, symbol: (e.symbol || "?").replace(/^\$/, ""), ethIn: e.ethIn, pnl: 0, status: "open", venue: "curve", held: e.tokens, realizedWei: "0", closing: false });
-      toast(`${state.live ? "bought" : "dry fire"} ${e.symbol} at tax ${(e.taxBps / 100).toFixed(2)}%${e.simulated ? " (simulated)" : ` after ${e.waitedMs} ms`}`);
+      toast(`${state.live ? "bought" : state.mode === "research" ? "modeled fire" : "dry fire"} ${e.symbol} at tax ${(e.taxBps / 100).toFixed(2)}%${e.simulated ? " (simulated)" : ` after ${e.waitedMs} ms`}`);
     }
     else if (e.kind === "hold") {
       const row = state.rows.get(e.token);

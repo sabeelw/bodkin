@@ -8,7 +8,7 @@ rust-toolchain.toml        channel = stable
 crates/bodkin/src/
   main.rs                  clap: doctor hunt board snipe watch scan fees
                            dev buy sell positions wallet claim helper
-                           outcomes replay. Imports bodkin:: not crate::
+                           outcomes capture replay. Imports bodkin:: not crate::
   lib.rs                   pub mods + re-exports
   chain.rs                 CHAIN_ID, ADDR, sequencer/feed defaults, grad constants
   config.rs                dotenvy iterator + validated env overlay; no process-global mutation
@@ -20,9 +20,10 @@ crates/bodkin/src/
   board.rs                 axum 127.0.0.1 + SSE + /api/*
   pons/                    curve math, tax, clock, launches, enrich, stream,
                            fingerprint, deployer, fees
-  trade/                   wallet, exec, journal, state, positions, submitter,
-                           burst, curve, pool, v4
-  outcomes.rs / replay.rs       typed provenance, causal reserve replay, manifests
+  trade/                   wallet, exec, journal, state, positions, scheduler,
+                           submitter, burst, curve, pool, v4
+  research.rs              bounded capture/verification + persistent modeled ledger
+  outcomes.rs / replay.rs  typed provenance, causal reserve and research replay
   view.rs / links.rs / fmt.rs / style.rs; alerts.rs is ETH/USD only
 crates/bodkin/bytecode/    committed BodkinBuyOnce.json
 crates/bodkin/tests/       curve.rs + oracle.rs (no network)
@@ -50,6 +51,8 @@ start-*.cmd                Windows: cargo build --release then bodkin.exe
 | Fire + manage loop, outcomes emit | `run.rs` |
 | Sequencer HTTP send, IP pin, spray | `trade/submitter.rs` |
 | Pre-sign burst | `trade/burst.rs` |
+| Deadline/priority execution ownership | `trade/scheduler.rs` |
+| Research capture, manifest, portfolio | `research.rs` |
 | Curve buy / helper call | `trade/curve.rs` |
 | sell_anywhere, value_now | `trade/pool.rs` |
 | v4 key / quoter / router layout | `trade/v4.rs` |
@@ -70,6 +73,9 @@ start-*.cmd                Windows: cargo build --release then bodkin.exe
 | `data/transactions.json` | best-effort operation export; legacy import only when redb has no operations |
 | `data/launches.jsonl` | `hunt` |
 | `data/outcomes.jsonl` | engine observations for outcomes/replay |
+| `<engine-data>/deployer-history-v1.json` | regenerable anchor-verified history checkpoint |
+| `<research-data>/research-portfolio.json` | persistent immutable profile/run and modeled risk ledger |
+| `<capture>/events.jsonl`, `<capture>/manifest.json` | bounded research capture and integrity manifest |
 
 redb's exclusive database lock enforces one engine or live command against a given `data/` at a time.
 

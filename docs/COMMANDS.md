@@ -24,7 +24,9 @@ Dry `snipe` requires a canonical curve snapshot from second +1 or +2, models the
 | [`claim`](#claim) | claim your creator fees from the pons escrow | only with `--live` |
 | `helper deploy/check` | `BodkinBuyOnce` create / bytecode at `HELPER_ADDRESS` | `--live` to broadcast |
 | `outcomes` | print `data/outcomes.jsonl` lift / hit / landing | no |
+| `capture --output DIR` | bounded read-only research capture with a verified manifest | no |
 | `replay --hours N` | recorded launch-time screens plus observed first-60-block logs at an alternate entry second | no |
+| `replay --research --dataset DIR` | verify and summarize an isolated research capture without inventing profitability | no |
 
 ---
 
@@ -66,7 +68,7 @@ graduations in the index window; the curve bar, real quote in, FDV, and the open
 ## board
 
 ```
-bodkin board [--port <n>] [--live] [--eth <n>] [--min-score <n>] [--keyword <regex>] [--allow-pairs]
+bodkin board [--port <n>] [--live] [--research --data-dir <dir>] [--eth <n>] [--min-score <n>] [--keyword <regex>] [--allow-pairs]
 ```
 
 Starts the same engine as `snipe` and serves `http://127.0.0.1:4663` (or `BOARD_PORT`). **The engine starts stopped**: the page is a live
@@ -74,7 +76,7 @@ feed of scored launches until you press **start demo** (dry run) or **arm live s
 Everything on the page is described in [BOARD.md](./BOARD.md): launches with a score bar and the first pass reason, a detail drawer per
 launch with links to pons, the explorer, Axiom and FOMO and every scoring line, positions with live marks and a **close now** button, rules
 with steppers that change the running engine, a pulse that tells a quiet chain from a dead engine, filters, search, keyboard shortcuts,
-sound on fire. Takes the same `--budget` and `--yes` flags as `snipe`.
+sound on fire. Takes the same `--budget` and `--yes` flags as `snipe`. `--research` requires an explicit state directory outside `data/`, cannot be combined with `--live`, and shows the immutable `risk-normalized-v1` profile and persistent modeled portfolio. That profile starts with 0.05 ETH, limits entry value plus modeled entry gas to 2% of current known equity, reserves modeled exit gas, permits three positions, reuses modeled sale proceeds, and latches liquidation at 10% drawdown. Missing liquidation values halt admissions instead of becoming zero or unchanged profit.
 
 ## snipe
 
@@ -98,7 +100,7 @@ bodkin snipe [--live] [--eth <n>] [--min-score <n>] [--max-tax-bps <n>] [--slipp
 | `--yes` | off | skip the live confirmation prompt (for scripts) |
 | `--for <seconds>` | | stop after this many seconds |
 
-The loop: detect → strict Multicall/transaction enrichment → score and rules → reserve budget/slot → wait to the `launchedAt + 2` gate → ingest ordered curve flow → recheck pause and live gates → pre-sign and dispatch the sequencer burst just before the first +2 block → reconcile every attempted hash and matching receipt event before opening a position. Marks run every second for the first minute and every `MANAGE_SLOW_SEC` seconds later (default 5). On-curve exits are ladder, stale, insider sell, or graduation boundary; take-profit, stop-loss, trailing stop, and max-hold apply only after graduation. Every refusal reports its reason.
+The loop: detect → strict Multicall/transaction enrichment → require a canonical, complete deployer-history window → score and rules → reserve budget/slot → wait toward `launchedAt + 2` → ingest ordered curve flow under the dispatch deadline → recheck pause, clock, live gates, and cutoff → pre-sign and dispatch the sequencer burst just before the first +2 block → reconcile every attempted hash and matching receipt event before opening a position. Preparation that misses the dispatch cutoff is skipped rather than chased. Manual/insider/risk exits outrank unsubmitted entries; entries outrank routine exits for at most 100 ms, while submitted nonce work always finishes reconciliation. Marks run every second for the first minute and every `MANAGE_SLOW_SEC` seconds later (default 5). On-curve exits are ladder, stale, insider sell, or graduation boundary; take-profit, stop-loss, trailing stop, and max-hold apply only after graduation. Every refusal reports its reason.
 
 With `--live`, before anything is armed, the terminal prints the signer, balance, size per buy, worst-case gas across the configured burst, position cap, and session budget. Balance and budget must cover one entry plus that reserve before it accepts `arm`. Admission reserves the worst case, then receipt reconciliation commits actual entry value and mined gas; unresolved attempts retain the reservation.
 
@@ -196,6 +198,8 @@ with `--live`, calls `claim()` and prints the receipt-derived `Claimed` amount.
 
 `bodkin replay --hours 6 [--sample N] [--entry-second 2]` uses schema-2 launch snapshots and ordered curve events captured by `snipe` or `board`, then observes up to the first 60 blocks. It prints a dataset hash and strategy manifest, reconstructs reserve changes only from events after the recorded snapshot and before the candidate entry cutoff, and reports the deterministic entry quote separately from observed graduation. Missing provenance, incomplete ranges, and historical outcomes remain explicitly unmeasured; replay never invents a fill, execution block, or profitability.
 
+`bodkin capture --for 86400 --max-bytes 1073741824 --output <new-dir>` records every observed launch and schedules a one-hour ordered-flow follow-up through read-only background RPC calls. The output directory must be new and outside normal `data/`; the recorder stops at 24 hours or 1 GiB, reserves room for `manifest.json`, never overwrites evidence, and records missing follow-ups explicitly. It constructs no wallet or submitter. `bodkin replay --research --dataset <dir>` verifies every sequence, byte count, run/chain/version field and rolling hash before streaming the dataset. It reports the predefined 0/1/2 second-1 buyer gates, pre-cutoff non-insider buyer diversity, buy/sell imbalance and insider sells, 60/90/180-second inactivity windows, 5/15/30-minute on-curve horizons, reused fee recipients, and near-pattern buckets. Pool counterfactuals and net returns remain `unmeasured`, so the initial report is deliberately inconclusive rather than a profitability claim.
+
 ---
 
 ## Environment (`.env`)
@@ -243,4 +247,7 @@ Configured URLs, addresses, booleans, finite percentages, integer widths, ladder
 | `data/transactions.json` | best-effort human-readable operation export; imported only if redb has no operations |
 | `data/launches.jsonl` | one line per launch `hunt` presented |
 | `data/outcomes.jsonl` | schema-2 launch/gate/submission/attempt/fire/exit/exit-failure observations with run, sequence, chain, version and replay provenance |
+| `<engine-data>/deployer-history-v1.json` | regenerable checkpoint used only after chain/factory/range anchor verification |
+| `<research-data>/research-portfolio.json` | immutable profile/run identity and persistent modeled cash, inventory, costs, peak, drawdown and risk latch |
+| `<capture>/events.jsonl`, `<capture>/manifest.json` | bounded research envelopes and their integrity/coverage manifest |
 | `.env` | your settings and, if you trade live, your key; git-ignored |

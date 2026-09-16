@@ -3,7 +3,7 @@ node_modules/
 dist/
 .env
 data/
-.agents
+/.agents
 *.log
 .DS_Store
 assets/*.txt
